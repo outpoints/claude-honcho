@@ -13,6 +13,10 @@ All notable changes to claude-honcho will be documented in this file.
   - Session anchoring: with a repo-local config, the session name is anchored to the project root (the folder containing `.honcho/`) instead of the current working directory, so subfolders of a project share one session instead of fragmenting; an optional `sessionName` field pins an exact name, and the nearest-ancestor `.honcho/` wins so placement controls granularity
   - `splitSubmodules` (opt-in): when set in a project's `.honcho`, each nested git repo (submodule) gets its own session named after the submodule while inheriting the parent's workspace — keeping submodule work separate without placing a `.honcho` in each submodule; a submodule with its own `.honcho` still takes precedence
 
+### Fixed
+
+- Injected-context cache is now scoped per workspace. The `context-cache.json` snapshot used to build the at-prompt memory hint was a single global slot, so with multiple Claude Code sessions running concurrently on different workspaces, one session could briefly inject another workspace's context. Each workspace now keeps its own cached snapshot. (Observation routing was always correct; this only affected the read-side hint.)
+
 ## [0.2.4] - 2026-04-01
 
 ### Added
