@@ -745,7 +745,7 @@ export async function runMcpServer(): Promise<void> {
               success: false,
               localConfig: true,
               configPath: getLocalConfigPath(),
-              message: "This project uses a repo-local Honcho config. set_config only edits the global config; to change project settings, edit this repo's .honcho/config.json directly.",
+              message: "A repo-local Honcho config is active for this project; the plugin treats it as read-only, so set_config made no change. Edit this repo's .honcho/config.json directly to change its settings.",
             }, null, 2),
           }],
         };
