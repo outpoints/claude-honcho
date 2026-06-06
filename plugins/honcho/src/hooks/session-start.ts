@@ -10,6 +10,8 @@ import {
   detectGitChanges,
 } from "../cache.js";
 import { Spinner } from "../spinner.js";
+import { setMemoryState, setSessionLink } from "../state.js";
+import { honchoSessionUrl } from "../styles.js";
 import { captureGitState, getRecentCommits, isGitRepo, inferFeatureContext } from "../git.js";
 import { logHook, logApiCall, logCache, logFlow, logAsync, setLogContext } from "../log.js";
 import { verboseApiResult, verboseList, clearVerboseLog } from "../visual.js";
@@ -81,6 +83,8 @@ export async function handleSessionStart(): Promise<void> {
   // Start loading animation with session name visible in the spinner message
   const spinner = new Spinner({ style: "neural" });
   spinner.start(`${sessionName} · loading memory`);
+  setMemoryState("loading", sessionName, claudeInstanceId);
+  setSessionLink(honchoSessionUrl(config.workspace, sessionName), sessionName, claudeInstanceId);
 
   try {
     logHook("session-start", `Starting session in ${cwd}`, { branch: currentGitState?.branch });
@@ -220,12 +224,14 @@ export async function handleSessionStart(): Promise<void> {
 
     // Stop spinner; avoid stdout writes here to prevent UI artifacts.
     spinner.stop();
+    setMemoryState("idle", undefined, claudeInstanceId);
 
     logFlow("complete", `Cache warmed: ${successCount}/1 context + 2 dialectic (fire-and-forget)`);
     process.exit(0);
   } catch (error) {
     logHook("session-start", `Error: ${error}`, { error: String(error) });
     spinner.stop();
+    setMemoryState("idle", undefined, claudeInstanceId);
     process.exit(0);
   }
 }

@@ -362,6 +362,21 @@ const fadeDots = [
 export async function playCooldown(message = "saving memory"): Promise<void> {
   const useAscii = !supportsUnicode();
 
+  // Claude Code (>=2.1.139) runs hooks without a controlling terminal: /dev/tty
+  // fails and stderr is captured, not streamed -- so \r frame animation would
+  // print as garbage. Animate only when there's a real terminal; otherwise
+  // degrade to a single clean line (SessionEnd shows stderr to the user).
+  let probe: number | null = null;
+  try { probe = openSync("/dev/tty", "w"); } catch { probe = null; }
+  const canAnimate = probe !== null || process.stderr.isTTY === true;
+  if (probe !== null) { try { closeSync(probe); } catch { /* ignore */ } }
+
+  if (!canAnimate) {
+    const sparkle = useAscii ? "*" : stars.sparkle2;
+    process.stderr.write(`${c.c5}${sparkle}${c.reset} ${c.dim}${message}${c.reset}\n`);
+    return;
+  }
+
   return new Promise((resolve) => {
     let frame = 0;
     let ttyFd: number | null = null;

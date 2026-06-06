@@ -69,7 +69,12 @@ bun -e "const h=require('os').homedir();const p=require('path');console.log(p.jo
 
 Then find the version directory inside that path and run the setup runner from there.
 
-If it succeeds, the key is valid and the full config file has been created.
+If it succeeds, the key is valid and the full config file has been created. The
+runner also installs the memory statusLine: it copies the renderer to
+`~/.honcho/honcho-statusline.sh` and registers it in `~/.claude/settings.json`
+(only when no `statusLine` is already configured — an existing one is left
+untouched and the path is printed for manual use). Toggle visibility later with
+the `statusline` key in `~/.honcho/config.json`: `on` (default) or `off`.
 
 If it fails, help the user troubleshoot:
 - Authentication error: key may be invalid, get a new one from https://app.honcho.dev

@@ -11,6 +11,7 @@ import {
   chunkContent,
 } from "../cache.js";
 import { playCooldown } from "../spinner.js";
+import { clearSessionFiles } from "../state.js";
 import { logHook, logApiCall, setLogContext } from "../log.js";
 
 
@@ -351,10 +352,12 @@ export async function handleSessionEnd(): Promise<void> {
 
     const meaningfulCount = assistantMessages.filter(m => m.isMeaningful).length;
     logHook("session-end", `Session saved: ${assistantMessages.length} assistant msgs (${meaningfulCount} meaningful), ${queuedMessages.length} queued msgs`);
+    clearSessionFiles(hookInput.session_id);
     process.exit(0);
   } catch (error) {
     logHook("session-end", `Error: ${error}`, { error: String(error) });
     // Local summary was already saved in phase 1 — not a total loss.
+    clearSessionFiles(hookInput.session_id);
     process.exit(0);
   }
 }

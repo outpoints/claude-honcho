@@ -1,6 +1,7 @@
 import { Honcho } from "@honcho-ai/sdk";
 import { loadConfig, getSessionForPath, getSessionName, getHonchoClientOptions, isPluginEnabled, getCachedStdin, getObservationMode } from "../config.js";
 import { Spinner } from "../spinner.js";
+import { setMemoryState } from "../state.js";
 import { logHook, logApiCall, setLogContext } from "../log.js";
 import { formatVerboseBlock, formatVerboseList } from "../visual.js";
 
@@ -119,6 +120,7 @@ export async function handlePreCompact(): Promise<void> {
   if (trigger === "auto") {
     spinner.start("anchoring memory before compaction");
   }
+  setMemoryState("compacting", undefined, hookInput.session_id);
 
   try {
     const honcho = new Honcho(getHonchoClientOptions(config));
@@ -205,6 +207,7 @@ export async function handlePreCompact(): Promise<void> {
     if (trigger === "auto") {
       spinner.stop("memory anchored");
     }
+    setMemoryState("idle", undefined, hookInput.session_id);
 
     // Add dialectic responses to verbose output
     if (userDialectic) {
@@ -227,6 +230,7 @@ export async function handlePreCompact(): Promise<void> {
     if (trigger === "auto") {
       spinner.fail("memory anchor failed");
     }
+    setMemoryState("idle", undefined, hookInput.session_id);
     // Don't block compaction on failure
     console.error(`[honcho] Pre-compact warning: ${error}`);
     process.exit(0);

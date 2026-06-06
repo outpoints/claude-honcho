@@ -26,6 +26,7 @@ import {
   type ReasoningLevel,
   type HonchoEnvironment,
   type ObservationMode,
+  type StatuslineMode,
   getObservationMode,
 } from "../config.js";
 import { honchoSessionUrl } from "../styles.js";
@@ -111,6 +112,7 @@ function handleGetConfig(cwd: string) {
     contextRefresh: cfg.contextRefresh ?? {},
     reasoningLevel: cfg.reasoningLevel ?? "medium",
     observationMode: cfg.observationMode ?? "unified",
+    statusline: cfg.statusline ?? "on",
     localContext: cfg.localContext ?? {},
     enabled: cfg.enabled !== false,
     logging: cfg.logging !== false,
@@ -166,6 +168,26 @@ function handleGetConfig(cwd: string) {
       warnings.push(`env var ${envVar}="${envVal}" is set but ignored (hosts block takes precedence). Remove it from your shell config.`);
     } else {
       warnings.push(`${field} is shadowed by env var ${envVar}="${envVal}"`);
+    }
+  }
+
+  // HONCHO_API_KEY is omitted from ENV_SHADOW_MAP and handled specially: an API
+  // key selects the Honcho *environment*, so when the env var overrides the
+  // configured key (resolveConfig: env wins, matching standard env>config
+  // precedence) every read and write silently routes to a different environment
+  // than config.json names. That's far more surprising than a normal override,
+  // so surface it whenever the env var is set — loudly on a mismatch.
+  const envApiKey = process.env.HONCHO_API_KEY;
+  if (envApiKey && rawFile.apiKey) {
+    const mask = (k: string) => `${k.slice(0, 10)}…${k.slice(-4)}`;
+    if (envApiKey !== rawFile.apiKey) {
+      warnings.push(
+        `HONCHO_API_KEY env var (${mask(envApiKey)}) overrides config.json apiKey (${mask(rawFile.apiKey)}) and is the key actually in use. ` +
+        `An API key selects the Honcho environment, so reads/writes go to the env var's environment, NOT the one config.json names. ` +
+        `Unset HONCHO_API_KEY in your shell to use config.json's key.`
+      );
+    } else {
+      warnings.push(`apiKey is also set via HONCHO_API_KEY env var (identical value). The env var takes precedence at runtime.`);
     }
   }
 
@@ -417,6 +439,21 @@ function handleSetConfig(args: Record<string, unknown>) {
       cfg.observationMode = String(value) as ObservationMode;
       break;
 
+    case "statusline": {
+      const mode = String(value).toLowerCase();
+      if (mode !== "on" && mode !== "off") {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ success: false, error: "statusline must be one of: on, off" }, null, 2) }],
+          isError: true,
+        };
+      }
+      previousValue = cfg.statusline ?? "on";
+      cfg.statusline = mode as StatuslineMode;
+      // statusline is a global field — write to root (user-directed action)
+      saveRootField("statusline", cfg.statusline);
+      break;
+    }
+
     case "localContext.maxEntries":
       previousValue = cfg.localContext?.maxEntries;
       if (!cfg.localContext) cfg.localContext = {};
@@ -481,6 +518,7 @@ function handleSetConfig(args: Record<string, unknown>) {
     contextRefresh: cfg.contextRefresh ?? {},
     reasoningLevel: cfg.reasoningLevel ?? "medium",
     observationMode: cfg.observationMode ?? "unified",
+    statusline: cfg.statusline ?? "on",
     localContext: cfg.localContext ?? {},
     enabled: cfg.enabled !== false,
     logging: cfg.logging !== false,

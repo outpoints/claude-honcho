@@ -17,6 +17,27 @@ All notable changes to claude-honcho will be documented in this file.
 
 - Injected-context cache is now scoped per workspace. The `context-cache.json` snapshot used to build the at-prompt memory hint was a single global slot, so with multiple Claude Code sessions running concurrently on different workspaces, one session could briefly inject another workspace's context. Each workspace now keeps its own cached snapshot. (Observation routing was always correct; this only affected the read-side hint.)
 
+## [0.2.5] - 2026-06-02
+
+### Added
+
+- Memory statusLine — surfaces what Honcho memory is doing on the Claude Code statusLine. Hooks write a per-window activity-state file (`~/.honcho/state-<session>.json`) and a host-managed renderer (`plugins/honcho/scripts/honcho-statusline.sh`) draws sync status, a clickable session link, and a live activity glyph (loading/compacting/recalling/querying). Installed and registered by `/honcho:setup`; toggle on/off via the `statusline` config key, settable through `/honcho:config`.
+- First-prompt tool hint — on the first prompt of a session, nudges the harness to actively call the Honcho MCP tools rather than rely only on passive context injection.
+- Per-host `apiKey` field in `hosts.<name>` — takes precedence over root `apiKey`, still overridden by `HONCHO_API_KEY` env var. Lets different integrations authenticate against different Honcho orgs from one config file.
+- `get_config` now warns when `HONCHO_API_KEY` is set and overrides the `apiKey` in `config.json`, so the active key is never ambiguous.
+- Version-update nag: warns on first prompt when the installed plugin is behind the published version (checks for updates at most once a day; silent on failure).
+- `scripts/analyze-usage.py` — analyzes Claude Code Honcho usage from `~/.claude` logs.
+
+### Changed
+
+- Skip `cd` commands when logging Bash tool calls
+
+### Fixed
+
+- Spinner degrades gracefully without a TTY — Claude Code >=2.1.139 runs hooks without a controlling terminal, so `/dev/tty` fails; probe for a real terminal and fall back to a single clean line when none is available.
+- `sessionStart` hook now runs async (#43).
+- Preserve a host-scoped `apiKey` already on disk when rewriting config — no longer drops `hosts.<host>.apiKey` on save.
+
 ## [0.2.4] - 2026-04-01
 
 ### Added

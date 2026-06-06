@@ -53,6 +53,8 @@ AskUserQuestion:
       description: "TTL, message threshold, dialectic settings"
     - label: "Message upload"
       description: "Token limits, summarization settings"
+    - label: "Statusline"
+      description: "Memory statusLine visibility — on / off (currently: {resolved.statusline})"
 ```
 
 Always include current values in the description so the user can see what's set.
@@ -162,6 +164,21 @@ AskUserQuestion:
 ```
 
 Then ask for the new value and call `set_config`.
+
+### Statusline
+
+```
+AskUserQuestion:
+  question: "Memory statusLine visibility?"
+  header: "Statusline"
+  options:
+    - label: "on (Recommended)"
+      description: "Sync status, clickable session link, and live activity"
+    - label: "off"
+      description: "Hidden"
+```
+
+Call `set_config` with field `statusline` and the chosen value. Takes effect on the next statusLine repaint.
 
 ### Message upload
 
