@@ -18,7 +18,8 @@ import {
 } from "../config.js";
 import * as s from "../styles.js";
 import { copyFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 
 // Installs the memory statusLine: ships the renderer to a stable path and
 // registers it in the user's global Claude Code settings. Plugins can't
@@ -28,7 +29,7 @@ import { join } from "path";
 function installStatusline(): void {
   console.log(s.section("Installing memory statusLine"));
 
-  const src = join(import.meta.dir, "..", "..", "scripts", "honcho-statusline.sh");
+  const src = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "honcho-statusline.sh");
   const dest = join(getConfigDir(), "honcho-statusline.sh");
   try {
     if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
@@ -151,8 +152,7 @@ async function setup(): Promise<void> {
 
   try {
     const honcho = new Honcho(getHonchoClientOptions(config));
-    const session = await honcho.session("setup-test");
-    const peer = await honcho.peer(config.peerName);
+    await honcho.workspaces();
     console.log(s.success("Connected to Honcho API"));
     console.log(`  ${s.label("Workspace")}: ${config.workspace}`);
     console.log(`  ${s.label("Peer")}:      ${config.peerName}`);
@@ -198,6 +198,20 @@ async function setup(): Promise<void> {
 
   installStatusline();
   console.log("");
+
+  // Report availability only — importing lives in /honcho:import.
+  try {
+    const { findTranscripts } = await import("./backfill-runner.js");
+    const transcripts = findTranscripts(30);
+    if (transcripts.length > 0) {
+      console.log(s.section("Import past sessions (optional)"));
+      console.log(s.listItem(`Found ${transcripts.length} local Claude Code session(s) from the last 30 days.`));
+      console.log(s.dim("  Run /honcho:import whenever you'd like to add your past work to Honcho."));
+      console.log("");
+    }
+  } catch {
+    // Non-fatal — the import is optional.
+  }
 
   console.log(s.success("Setup complete -- Honcho memory is ready"));
   console.log("");

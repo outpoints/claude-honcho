@@ -2,7 +2,65 @@
 
 All notable changes to claude-honcho will be documented in this file.
 
-## [Unreleased]
+## [0.2.11] - 2026-07-31
+
+### Added
+
+- `/honcho:insights` skill — runs a max-reasoning dialectic pass over accumulated memory and turns it into proposed CLAUDE.md edits, output-style rules, and skill ideas. Falls back to a parallel `honcho_remember` fan-out at `high` if the max query times out. Read-only until the user picks what to apply.
+- Session briefing (session summary + peer card) — injectable at session start, and loadable on demand via the `get_briefing` MCP tool or `/honcho:briefing` skill.
+
+### Fixed
+
+- Hook timeouts specified in seconds instead of milliseconds.
+- `set_config` coerces string booleans.
+
+## [0.2.10] - 2026-07-29
+
+### Changed
+
+- Per-turn injection components report a one-line summary instead of printing their contents. `injection.showContents` lists the components that should still print their full payload (default: none). Display only — what reaches the model is unchanged.
+
+## [0.2.9] - 2026-07-28
+
+### Changed
+
+- Per-turn injection's `context` component split into three independently selectable components: `userContext` (the former `context`), `assistantContext` (the same fetch for the AI peer), and `sessionContext` (recent raw messages from the mapped Honcho session via `session.context()`, budget via `injection.sessionContextTokens`). Stored configs using `context` keep working — it resolves to `userContext`.
+
+## [0.2.8] - 2026-07-27
+
+### Added
+
+- `/honcho:import` skill to backfill past Claude Code sessions into Honcho memory.
+- Composable, config-driven memory injection — `injection` config block with per-surface component menus (`sessionStart` / `perTurn`) and retrieval tuning (`searchTopK`, `maxConclusions`, `searchMaxDistance`).
+- Memory-usage directives now ship automatically as SessionStart context — no more manual CLAUDE.md paste.
+- Optional dialectic summary component for the user-prompt hook.
+- `honcho_remember` MCP tool for mid-conversation recall (batched questions, configurable reasoning tier) — opt in via the `rememberTool` config flag; session-start directives nudge proactive use when enabled.
+
+### Fixed
+
+- Machine plumbing (runtime `<<...>>` sentinels, `[Session ended]` markers) is no longer attributed to the user peer.
+- Batched message uploads no longer replay already-accepted batches after a partial failure.
+- SessionEnd hook does nothing beyond logging and state cleanup, so `/exit` can no longer surface "Hook cancelled".
+
+## [0.2.7] - 2026-07-22
+
+### Added
+
+- `saveToolUse` config flag (`HONCHO_SAVE_TOOL_USE` env var) to opt into uploading tool-use messages.
+
+### Changed
+
+- Messages upload live (user prompts on submit, assistant messages from the stop hook) instead of being queued and flushed at session end.
+
+### Fixed
+
+- Stop hook no longer uploads assistant messages when the turn has no preceding user prompt.
+
+## [0.2.6] - 2026-07-21
+
+### Fixed
+
+- MCP `chat` tool no longer times out on long dialectic queries (~80s at max reasoning). Dialectic calls run on a dedicated no-retry Honcho client under a single 120s deadline covering the whole flow, and the plugin's MCP server config sets a 150s per-tool timeout, so the server's clean timeout error always surfaces before the harness aborts the call.
 
 ### Added
 

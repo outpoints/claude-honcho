@@ -1,12 +1,11 @@
 import { homedir } from "os";
 import { join } from "path";
-import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { getContextRefreshConfig, getLocalContextConfig, loadConfig } from "./config.js";
 
 const CACHE_DIR = join(homedir(), ".honcho");
 const ID_CACHE_FILE = join(CACHE_DIR, "cache.json");
 const CONTEXT_CACHE_FILE = join(CACHE_DIR, "context-cache.json");
-const MESSAGE_QUEUE_FILE = join(CACHE_DIR, "message-queue.jsonl");
 const CLAUDE_CONTEXT_FILE = join(CACHE_DIR, "claude-context.md");
 
 // Ensure cache directory exists
@@ -123,7 +122,6 @@ interface ContextCache {
   // Injected-context snapshots keyed by workspace name, so concurrent sessions on
   // different workspaces never read each other's cached context. (Writes/observations
   // are already isolated per workspace; this scopes the read-side cache to match.)
-  userContextByWorkspace?: Record<string, ContextCacheEntry>;
   claudeContextByWorkspace?: Record<string, ContextCacheEntry>;
   // Legacy single-slot fields from before workspace scoping. No longer written;
   // retained only so loadContextCache() doesn't strip them as ghosts on upgrade.
@@ -154,14 +152,9 @@ function getContextTTL(): number {
   return (config.ttlSeconds ?? 300) * 1000; // Convert to ms
 }
 
-function getMessageRefreshThreshold(): number {
-  const config = getContextRefreshConfig();
-  return config.messageThreshold ?? 50;
-}
-
 // Known keys in ContextCache — anything else is a ghost from older versions
 const CONTEXT_CACHE_KNOWN_KEYS = new Set([
-  "userContextByWorkspace", "claudeContextByWorkspace",
+  "claudeContextByWorkspace",
   "userContext", "claudeContext", "summaries", "messageCount", "lastRefreshMessageCount",
 ]);
 
@@ -194,28 +187,6 @@ export function saveContextCache(cache: ContextCache): void {
   writeFileSync(CONTEXT_CACHE_FILE, JSON.stringify(cache, null, 2));
 }
 
-export function getCachedUserContext(): any | null {
-  const cache = loadContextCache();
-  const entry = cache.userContextByWorkspace?.[contextCacheKey()];
-  if (entry && Date.now() - entry.fetchedAt < getContextTTL()) {
-    return entry.data;
-  }
-  return null;
-}
-
-/** Return cached context even if expired (for timeout fallback) */
-export function getStaleCachedUserContext(): any | null {
-  const cache = loadContextCache();
-  return cache.userContextByWorkspace?.[contextCacheKey()]?.data ?? null;
-}
-
-export function setCachedUserContext(data: any): void {
-  const cache = loadContextCache();
-  if (!cache.userContextByWorkspace) cache.userContextByWorkspace = {};
-  cache.userContextByWorkspace[contextCacheKey()] = { data, fetchedAt: Date.now() };
-  saveContextCache(cache);
-}
-
 export function getCachedClaudeContext(): any | null {
   const cache = loadContextCache();
   const entry = cache.claudeContextByWorkspace?.[contextCacheKey()];
@@ -232,13 +203,6 @@ export function setCachedClaudeContext(data: any): void {
   saveContextCache(cache);
 }
 
-export function isContextCacheStale(): boolean {
-  const cache = loadContextCache();
-  const entry = cache.userContextByWorkspace?.[contextCacheKey()];
-  if (!entry) return true;
-  return Date.now() - entry.fetchedAt >= getContextTTL();
-}
-
 // Track message count for threshold-based refresh
 export function incrementMessageCount(): number {
   const cache = loadContextCache();
@@ -252,102 +216,10 @@ export function getMessageCount(): number {
   return cache.messageCount || 0;
 }
 
-export function shouldRefreshKnowledgeGraph(): boolean {
-  const cache = loadContextCache();
-  const currentCount = cache.messageCount || 0;
-  const lastRefresh = cache.lastRefreshMessageCount || 0;
-
-  // Refresh if we've sent threshold messages since last refresh
-  return (currentCount - lastRefresh) >= getMessageRefreshThreshold();
-}
-
-export function markKnowledgeGraphRefreshed(): void {
-  const cache = loadContextCache();
-  cache.lastRefreshMessageCount = cache.messageCount || 0;
-  saveContextCache(cache);
-}
-
 export function resetMessageCount(): void {
   const cache = loadContextCache();
   cache.messageCount = 0;
-  cache.lastRefreshMessageCount = 0;
   saveContextCache(cache);
-}
-
-// ============================================
-// Message Queue - local file for reliability
-// ============================================
-
-interface QueuedMessage {
-  content: string;
-  peerId: string;
-  cwd: string;
-  timestamp: string;
-  uploaded?: boolean;
-  instanceId?: string; // Claude Code instance for parallel session support
-}
-
-export function queueMessage(content: string, peerId: string, cwd: string, instanceId?: string): void {
-  ensureCacheDir();
-  const message: QueuedMessage = {
-    content,
-    peerId,
-    cwd,
-    timestamp: new Date().toISOString(),
-    uploaded: false,
-    instanceId: instanceId || getClaudeInstanceId() || undefined,
-  };
-  appendFileSync(MESSAGE_QUEUE_FILE, JSON.stringify(message) + "\n");
-}
-
-export function getQueuedMessages(forCwd?: string): QueuedMessage[] {
-  ensureCacheDir();
-  if (!existsSync(MESSAGE_QUEUE_FILE)) {
-    return [];
-  }
-  try {
-    const content = readFileSync(MESSAGE_QUEUE_FILE, "utf-8");
-    const lines = content.split("\n").filter((line) => line.trim());
-    const messages = lines.map((line) => JSON.parse(line)).filter((msg) => !msg.uploaded);
-    // Filter by cwd if specified
-    if (forCwd) {
-      return messages.filter((msg) => msg.cwd === forCwd);
-    }
-    return messages;
-  } catch {
-    return [];
-  }
-}
-
-export function clearMessageQueue(): void {
-  ensureCacheDir();
-  writeFileSync(MESSAGE_QUEUE_FILE, "");
-}
-
-export function markMessagesUploaded(forCwd?: string): void {
-  if (!forCwd) {
-    // Clear all
-    clearMessageQueue();
-    return;
-  }
-  // Only remove messages for the specified cwd, keep others
-  ensureCacheDir();
-  if (!existsSync(MESSAGE_QUEUE_FILE)) return;
-  try {
-    const content = readFileSync(MESSAGE_QUEUE_FILE, "utf-8");
-    const lines = content.split("\n").filter((line) => line.trim());
-    const remaining = lines.filter((line) => {
-      try {
-        const msg = JSON.parse(line);
-        return msg.cwd !== forCwd;
-      } catch {
-        return false;
-      }
-    });
-    writeFileSync(MESSAGE_QUEUE_FILE, remaining.join("\n") + (remaining.length ? "\n" : ""));
-  } catch {
-    // ignore
-  }
 }
 
 // ============================================
@@ -400,50 +272,6 @@ export function appendClaudeWork(workDescription: string): void {
   }
 
   saveClaudeLocalContext(existing + entry);
-}
-
-export function generateClaudeSummary(
-  sessionName: string,
-  workItems: string[],
-  assistantMessages: string[]
-): string {
-  const timestamp = new Date().toISOString();
-
-  // Extract key actions from assistant messages
-  const actions: string[] = [];
-  for (const msg of assistantMessages.slice(-10)) {
-    // Look for action indicators
-    if (msg.includes("Created") || msg.includes("Updated") || msg.includes("Fixed")) {
-      const firstSentence = msg.split(/[.!?\n]/)[0];
-      if (firstSentence.length < 200) {
-        actions.push(firstSentence);
-      }
-    }
-  }
-
-  let summary = `# CLAUDE Work Context
-
-Last updated: ${timestamp}
-Session: ${sessionName}
-
-## What CLAUDE Was Working On
-
-`;
-
-  if (workItems.length > 0) {
-    summary += workItems.map((w) => `- ${w}`).join("\n");
-    summary += "\n\n";
-  }
-
-  if (actions.length > 0) {
-    summary += "## Recent Actions\n\n";
-    summary += actions.slice(-10).map((a) => `- ${a}`).join("\n");
-    summary += "\n\n";
-  }
-
-  summary += "## Recent Activity\n";
-
-  return summary;
 }
 
 // ============================================
@@ -554,6 +382,7 @@ export function detectGitChanges(previous: GitState | null, current: GitState): 
 // Message Chunking - split large messages for API limits
 // ============================================
 
+// Under Honcho's 25k-char per-message cap, with headroom for the [Part i/N] prefix.
 const MAX_MESSAGE_SIZE = 24000;
 
 export function chunkContent(content: string, maxSize: number = MAX_MESSAGE_SIZE): string[] {
@@ -592,6 +421,38 @@ export function chunkContent(content: string, maxSize: number = MAX_MESSAGE_SIZE
   return chunks;
 }
 
+export const HONCHO_MAX_BATCH = 100;
+
+type SessionLike = { addMessages: (messages: any[]) => Promise<unknown> };
+
+/**
+ * Upload messages, split across calls of ≤100 to stay under Honcho's batch cap.
+ *
+ * When `resolveFallback` is given, a batch failure resolves an alternate session
+ * once and retries only the failed batch (and any remaining ones) on it. This
+ * lets callers front a fast noEnsure session and fall back to get-or-create
+ * without ever replaying batches the first session already accepted.
+ */
+export async function addMessagesBatched(
+  session: SessionLike,
+  messages: any[],
+  resolveFallback?: (error: unknown) => Promise<SessionLike>,
+): Promise<void> {
+  let active = session;
+  let usedFallback = false;
+  for (let i = 0; i < messages.length; i += HONCHO_MAX_BATCH) {
+    const batch = messages.slice(i, i + HONCHO_MAX_BATCH);
+    try {
+      await active.addMessages(batch);
+    } catch (e) {
+      if (usedFallback || !resolveFallback) throw e;
+      active = await resolveFallback(e);
+      usedFallback = true;
+      await active.addMessages(batch);
+    }
+  }
+}
+
 // ============================================
 // Utility: Clear all caches (for debugging)
 // ============================================
@@ -600,7 +461,6 @@ export function clearAllCaches(): void {
   ensureCacheDir();
   if (existsSync(ID_CACHE_FILE)) writeFileSync(ID_CACHE_FILE, "{}");
   if (existsSync(CONTEXT_CACHE_FILE)) writeFileSync(CONTEXT_CACHE_FILE, "{}");
-  if (existsSync(MESSAGE_QUEUE_FILE)) writeFileSync(MESSAGE_QUEUE_FILE, "");
   if (existsSync(GIT_STATE_FILE)) writeFileSync(GIT_STATE_FILE, "{}");
   // Don't clear claude-context.md - that's valuable history
 }
@@ -618,10 +478,9 @@ export function clearPeerCache(): void {
   saveIdCache(cache);
 }
 
-/** Clear cached user context (all workspaces + legacy slot). */
+/** Clear cached user context (legacy slot; user context is no longer cached). */
 export function clearUserContextOnly(): void {
   const cache = loadContextCache();
-  cache.userContextByWorkspace = {};
   delete cache.userContext;
   saveContextCache(cache);
 }

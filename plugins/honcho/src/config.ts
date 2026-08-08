@@ -1,6 +1,7 @@
 import { homedir } from "os";
-import { join, basename, dirname, resolve } from "path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { join, basename, dirname, resolve, sep } from "path";
+import { fileURLToPath } from "url";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { captureGitState } from "./git.js";
 import { getInstanceIdForCwd, getClaudeInstanceId } from "./cache.js";
 
@@ -31,7 +32,113 @@ export interface LocalContextConfig {
   maxEntries?: number;
 }
 
-export type ReasoningLevel = "minimal" | "low" | "medium" | "high" | "max";
+// ============================================
+// Composable injection (DEV-2088 + DEV-2024)
+// ============================================
+
+/**
+ * Components the SessionStart hook may emit once per session. The tuple is the
+ * single source of truth: the union type derives from it, and set_config
+ * validation builds its allow-set and error text from the same array — so
+ * adding a component is a one-line edit with no drift between layers.
+ * - "directives": static memory-usage guidance (treat injected memory as
+ *   background, use chat/search, save insights) — formerly a manual "paste
+ *   this into your CLAUDE.md" README step; now shipped every session instead.
+ * - "summary": the SDK `session.summaries().long` narrative.
+ * - "peerCard" / "peerRepresentation": the two fields of a single context() call,
+ *   each injected at full length (no per-field caps — inclusion is the only lever).
+ * - "briefing": a static nudge to call the `get_briefing` MCP tool instead of
+ *   injecting summary/peerCard inline — the tool call renders as an expandable
+ *   row in the UI, making the briefing user-visible. Use in place of
+ *   "summary"/"peerCard", not alongside them (the content would land twice).
+ */
+export const SESSION_START_COMPONENTS = ["directives", "summary", "peerCard", "peerRepresentation", "briefing"] as const;
+export type SessionStartComponent = (typeof SESSION_START_COMPONENTS)[number];
+
+/**
+ * Components the UserPromptSubmit hook may emit per non-trivial prompt.
+ * - "userContext": a fresh, prompt-scoped peer.context() blob for the user
+ *   peer, whose semantic retrieval is shaped by the searchTopK/
+ *   searchMaxDistance/maxConclusions knobs below.
+ * - "assistantContext": the same peer.context() fetch, but for the AI peer —
+ *   what Honcho has derived about the assistant itself.
+ * - "sessionContext": recent raw messages from the currently mapped Honcho
+ *   session via session.context() (summary off, no search), which can span
+ *   other Claude instances sharing the session name.
+ * - "dialectic": a reasoned peer.chat() answer over the representation, seeded
+ *   from `dialecticTemplate` (the prompt substituted into %{user_query}) at the
+ *   `dialecticReasoning` tier. Off by default — chat() is far slower than
+ *   context() (~12s at medium), so it runs on its own budget, not the 4s
+ *   context race, and stays under the 30s UserPromptSubmit harness ceiling.
+ *
+ * A "search" component (filtered semantic search over inductive conclusions)
+ * was scoped out: `level` is not filterable through the API, so it needs a
+ * honcho-backend + SDK change before it can ship. See the plan.
+ */
+export const PER_TURN_COMPONENTS = ["userContext", "assistantContext", "sessionContext", "dialectic"] as const;
+export type PerTurnComponent = (typeof PER_TURN_COMPONENTS)[number];
+
+/** Pre-split configs stored `"context"` for what is now "userContext". */
+export function normalizePerTurn(components: string[]): PerTurnComponent[] {
+  return components.map((c) => (c === "context" ? "userContext" : c)) as PerTurnComponent[];
+}
+
+/**
+ * The `injection` config block: turns the two hardcoded injection surfaces
+ * into a composable, config-driven menu. Each surface selects zero or more
+ * components; the retrieval knobs shape whatever those components emit.
+ */
+export interface InjectionConfig {
+  /** Components emitted once at session open (default: ["directives", "summary", "peerCard"]). */
+  sessionStart?: SessionStartComponent[];
+  /** Components emitted per non-trivial prompt (default: ["userContext"]). */
+  perTurn?: PerTurnComponent[];
+  /** Per-turn components whose full injected payload is printed to the terminal.
+   *  Components not listed still inject; they just report a one-line summary
+   *  instead of their contents (default: [] — summaries only). */
+  showContents?: PerTurnComponent[];
+  /** Top-K conclusions pulled by context()'s semantic search (default: 10). */
+  searchTopK?: number;
+  /** Max conclusions injected per context() call (default: 15). */
+  maxConclusions?: number;
+  /** Max cosine distance for context()'s semantic search — lower is stricter
+   *  (default: 0.6). */
+  searchMaxDistance?: number;
+  /** What drives the per-turn semantic search: the raw "prompt" (default)
+   *  or extracted "topics". */
+  searchQuerySource?: "topics" | "prompt";
+  /** Token budget for the per-turn "sessionContext" message fetch (default: 1500). */
+  sessionContextTokens?: number;
+  /** Query template for the per-turn "dialectic" component. The user's prompt
+   *  is substituted into every `%{user_query}` (default: surface anything from
+   *  the user's history relevant to the prompt). */
+  dialecticTemplate?: string;
+  /** Reasoning tier for the per-turn "dialectic" chat() call (default: "low").
+   *  Kept separate from the top-level `reasoningLevel` so per-turn dialectic can
+   *  stay cheap on the hot path without lowering the tier used elsewhere. */
+  dialecticReasoning?: ReasoningLevel;
+}
+
+/** Resolved injection defaults: memory-usage directives + session summary +
+ *  peer card at session start, a fresh user-peer context() per turn. Retrieval knobs
+ *  are tuned for a lean per-turn block — topK 10 for recall, a 0.6 cosine
+ *  distance, searching on the raw prompt. No component prints its contents. */
+export const DEFAULT_INJECTION: Required<InjectionConfig> = {
+  sessionStart: ["directives", "summary", "peerCard"],
+  perTurn: ["userContext"],
+  showContents: [],
+  searchTopK: 10,
+  maxConclusions: 15,
+  searchMaxDistance: 0.6,
+  searchQuerySource: "prompt",
+  sessionContextTokens: 1500,
+  dialecticTemplate:
+    "Return a compact, factual list of anything from the user's history — preferences, prior decisions, relevant past work — that would help with the following. Write in the third person as background notes; do not address the user, ask questions, or offer next steps. If nothing relevant exists, say so in one line. Relevant to: %{user_query}",
+  dialecticReasoning: "medium",
+};
+
+export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "max"] as const;
+export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 
 export type SessionStrategy = "per-directory" | "git-branch" | "chat-instance";
 
@@ -76,6 +183,8 @@ export interface HostConfig {
   enabled?: boolean;
   logging?: boolean;
   saveMessages?: boolean;
+  saveToolUse?: boolean;
+  saveGitEvents?: boolean;
   sessionStrategy?: SessionStrategy;
   sessionPeerPrefix?: boolean;
   /** Default reasoning level for Honcho dialectic calls (default: "medium") */
@@ -90,6 +199,10 @@ export interface HostConfig {
   contextRefresh?: ContextRefreshConfig;
   localContext?: LocalContextConfig;
   endpoint?: HonchoEndpointConfig;
+  /** Composable injection config (session-start + per-turn component menus). */
+  injection?: InjectionConfig;
+  /** Register the on-demand `honcho_remember` MCP tool (default: false). */
+  rememberTool?: boolean;
 }
 
 let _detectedHost: HonchoHost | null = null;
@@ -133,6 +246,15 @@ export function getDefaultAiPeer(host?: HonchoHost): string {
   return DEFAULT_AI_PEER[host ?? getDetectedHost()];
 }
 
+// MCP tool arguments may arrive as strings; Boolean("false") is true.
+export function coerceBoolean(value: unknown): boolean {
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    return v !== "false" && v !== "0" && v !== "";
+  }
+  return Boolean(value);
+}
+
 // Stdin cache: entry points read stdin once via initHook(),
 // handlers consume from cache via getCachedStdin().
 let _stdinText: string | null = null;
@@ -145,13 +267,20 @@ export function getCachedStdin(): string | null {
   return _stdinText;
 }
 
+/** Runtime-agnostic stdin read (hooks run under bun in dev, node when bundled). */
+export async function readStdinText(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString("utf-8");
+}
+
 /**
  * Shared hook entry point initialization.
  * Reads stdin once, caches it, detects host, and exits early for unsupported hosts.
  * Must be called at the top of every hook entry point before the handler.
  */
 export async function initHook(): Promise<void> {
-  const stdinText = await Bun.stdin.text();
+  const stdinText = await readStdinText();
   cacheStdin(stdinText);
   let input: Record<string, unknown> = {};
   try { input = JSON.parse(stdinText || "{}"); } catch { process.exit(0); }
@@ -179,6 +308,10 @@ interface HonchoFileConfig {
   aiPeer?: string;
   sessions?: Record<string, string>;
   saveMessages?: boolean;
+  /** Save [Tool] action summaries to Honcho (default: false) */
+  saveToolUse?: boolean;
+  /** Save [Git External] state-change events to Honcho (default: false) */
+  saveGitEvents?: boolean;
   messageUpload?: MessageUploadConfig;
   contextRefresh?: ContextRefreshConfig;
   endpoint?: HonchoEndpointConfig;
@@ -198,6 +331,10 @@ interface HonchoFileConfig {
   observationMode?: ObservationMode;
   /** Memory statusLine visibility: "on" (default) · "off" */
   statusline?: StatuslineMode;
+  /** Composable injection config (session-start + per-turn component menus). */
+  injection?: InjectionConfig;
+  /** Register the on-demand `honcho_remember` MCP tool (default: false). */
+  rememberTool?: boolean;
   hosts?: Record<string, HostConfig>;
   /** When true, flat workspace/aiPeer fields apply to ALL hosts,
    *  ignoring host-specific blocks. When false (default), each host
@@ -233,6 +370,10 @@ export interface HonchoCLAUDEConfig {
   sessions?: Record<string, string>;
   /** Save messages to Honcho (default: true) */
   saveMessages?: boolean;
+  /** Save [Tool] action summaries to Honcho (default: false — low signal, redundant with assistant reasoning) */
+  saveToolUse?: boolean;
+  /** Save [Git External] state-change events to Honcho (default: false — machine plumbing, not user input) */
+  saveGitEvents?: boolean;
   /** Default reasoning level for Honcho dialectic calls (default: "medium") */
   reasoningLevel?: ReasoningLevel;
   /**
@@ -251,6 +392,11 @@ export interface HonchoCLAUDEConfig {
   endpoint?: HonchoEndpointConfig;
   /** Local claude-context.md settings */
   localContext?: LocalContextConfig;
+  /** Composable injection config (session-start + per-turn component menus) */
+  injection?: InjectionConfig;
+  /** Register the on-demand `honcho_remember` MCP tool (default: false).
+   *  Not a hook-injection surface — a deliberate, model-invoked recall tool. */
+  rememberTool?: boolean;
   /** Temporarily disable plugin (default: true) */
   enabled?: boolean;
   /** Enable file logging to ~/.honcho/ (default: true) */
@@ -286,6 +432,30 @@ export function getConfigPath(): string {
 
 export function configExists(): boolean {
   return existsSync(CONFIG_FILE);
+}
+
+/**
+ * The plugin's own version, read from plugin.json — the same source the
+ * version-check script uses. Returns "unknown" when the manifest can't be
+ * located, so callers never advertise a stale hardcoded number.
+ */
+export function getPluginVersion(): string {
+  // CLAUDE_PLUGIN_ROOT when the host sets it; otherwise one hop up from this
+  // module, which holds in both layouts (src/ in dev, the dist/ chunk bundled).
+  const root = process.env.CLAUDE_PLUGIN_ROOT;
+  const candidates = [
+    ...(root ? [join(root, ".claude-plugin", "plugin.json")] : []),
+    fileURLToPath(new URL("../.claude-plugin/plugin.json", import.meta.url)),
+  ];
+  for (const manifest of candidates) {
+    try {
+      const version = (JSON.parse(readFileSync(manifest, "utf-8")) as { version?: unknown }).version;
+      if (typeof version === "string" && version) return version;
+    } catch {
+      // Try the next candidate
+    }
+  }
+  return "unknown";
 }
 
 /**
@@ -355,12 +525,16 @@ function resolveConfig(raw: HonchoFileConfig, host: HonchoHost): HonchoCLAUDECon
     sessionPeerPrefix: hostBlock?.sessionPeerPrefix ?? raw.sessionPeerPrefix,
     sessions: raw.sessions,
     saveMessages: hostBlock?.saveMessages ?? raw.saveMessages,
+    saveToolUse: hostBlock?.saveToolUse ?? raw.saveToolUse,
+    saveGitEvents: hostBlock?.saveGitEvents ?? raw.saveGitEvents,
     reasoningLevel: hostBlock?.reasoningLevel ?? raw.reasoningLevel,
     observationMode: hostBlock?.observationMode ?? raw.observationMode,
     messageUpload: hostBlock?.messageUpload ?? raw.messageUpload,
     contextRefresh: hostBlock?.contextRefresh ?? raw.contextRefresh,
     endpoint: hostBlock?.endpoint ?? raw.endpoint,
     localContext: hostBlock?.localContext ?? raw.localContext,
+    injection: hostBlock?.injection ?? raw.injection,
+    rememberTool: hostBlock?.rememberTool ?? raw.rememberTool,
     enabled: hostBlock?.enabled ?? raw.enabled,
     logging: hostBlock?.logging ?? raw.logging,
     globalOverride: raw.globalOverride,
@@ -395,6 +569,8 @@ export function loadConfigFromEnv(host?: HonchoHost): HonchoCLAUDEConfig | null 
     workspace,
     aiPeer,
     saveMessages: process.env.HONCHO_SAVE_MESSAGES !== "false",
+    saveToolUse: process.env.HONCHO_SAVE_TOOL_USE === "true",
+    saveGitEvents: process.env.HONCHO_SAVE_GIT_EVENTS === "true",
     enabled: process.env.HONCHO_ENABLED !== "false",
     logging: process.env.HONCHO_LOGGING !== "false",
   };
@@ -430,6 +606,12 @@ function mergeWithEnvVars(config: HonchoCLAUDEConfig): HonchoCLAUDEConfig {
   }
   if (process.env.HONCHO_LOGGING === "false") {
     config.logging = false;
+  }
+  if (process.env.HONCHO_SAVE_TOOL_USE !== undefined) {
+    config.saveToolUse = process.env.HONCHO_SAVE_TOOL_USE === "true";
+  }
+  if (process.env.HONCHO_SAVE_GIT_EVENTS !== undefined) {
+    config.saveGitEvents = process.env.HONCHO_SAVE_GIT_EVENTS === "true";
   }
   return config;
 }
@@ -682,6 +864,8 @@ export function saveConfig(config: HonchoCLAUDEConfig): void {
   setHostIfExplicit("contextRefresh", config.contextRefresh, existing.contextRefresh);
   setHostIfExplicit("localContext", config.localContext, existing.localContext);
   setHostIfExplicit("endpoint", config.endpoint, existing.endpoint);
+  setHostIfExplicit("injection", config.injection, existing.injection);
+  setHostIfExplicit("rememberTool", config.rememberTool, existing.rememberTool);
 
   // Preserve a host-scoped apiKey already on disk. This integration never writes
   // apiKey (config.apiKey is the *resolved* key — env/root — and must not be
@@ -725,10 +909,85 @@ export function getClaudeSettingsDir(): string {
   return join(homedir(), ".claude");
 }
 
-export function getSessionForPath(cwd: string): string | null {
+/** Main repository root for a linked worktree, parsed from dir's `.git`
+ *  pointer file. Handles standard (`<repo>/.git/worktrees/<n>`) and bare-hub
+ *  (`<hub>.git/worktrees/<n>`) layouts; null for regular repositories and
+ *  anything else (submodules, separate-git-dir). */
+export function resolveWorktreeMainRoot(dir: string): string | null {
+  try {
+    const gitPath = join(dir, ".git");
+    if (!statSync(gitPath).isFile()) return null;
+    const match = readFileSync(gitPath, "utf-8").match(/^gitdir:\s*(.+?)\s*$/m);
+    if (!match) return null;
+    const gitdir = resolve(dir, match[1]);
+    const idx = gitdir.lastIndexOf(`${sep}worktrees${sep}`);
+    if (idx === -1) return null;
+    const gitContainer = gitdir.slice(0, idx);
+    if (basename(gitContainer) === ".git") return dirname(gitContainer);
+    if (gitContainer.endsWith(".git")) return gitContainer;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Bound on the .git lookup walk; cwds nested deeper keep per-directory naming.
+const MAX_GIT_WALK_UP = 12;
+
+/** Main repository root when cwd is inside a linked git worktree, else null. */
+export function worktreeMainRootFor(cwd: string): string | null {
+  try {
+    let dir = resolve(cwd);
+    for (let i = 0; i < MAX_GIT_WALK_UP; i++) {
+      if (existsSync(join(dir, ".git"))) return resolveWorktreeMainRoot(dir);
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+export function getSessionForPath(cwd: string, mainRoot?: string | null): string | null {
   const config = loadConfig();
   if (!config?.sessions) return null;
-  return config.sessions[cwd] || null;
+  if (config.sessions[cwd]) return config.sessions[cwd];
+  // Worktrees without a mapping of their own share the main repo's session.
+  const mr = mainRoot === undefined ? worktreeMainRootFor(cwd) : mainRoot;
+  if (mr && config.sessions[mr]) return config.sessions[mr];
+  return null;
+}
+
+export function deriveSessionName(
+  strategy: SessionStrategy,
+  cwd: string,
+  opts: { peerName?: string; sessionPeerPrefix?: boolean; branch?: string; instanceId?: string } = {}
+): string {
+  const usePrefix = opts.sessionPeerPrefix !== false; // default true
+  const peerPart = opts.peerName ? sanitizeForSessionName(opts.peerName) : "user";
+  const repoPart = sanitizeForSessionName(basename(cwd));
+  const base = usePrefix ? `${peerPart}-${repoPart}` : repoPart;
+
+  switch (strategy) {
+    case "git-branch": {
+      if (opts.branch) {
+        const branchPart = sanitizeForSessionName(opts.branch);
+        return `${base}-${branchPart}`;
+      }
+      return base;
+    }
+    case "chat-instance": {
+      if (opts.instanceId) {
+        return usePrefix ? `${peerPart}-chat-${opts.instanceId}` : `chat-${opts.instanceId}`;
+      }
+      return base;
+    }
+    case "per-directory":
+    default:
+      return base;
+  }
 }
 
 /** Session name derived from strategy. Manual overrides only apply to per-directory.
@@ -739,6 +998,7 @@ export function getSessionForPath(cwd: string): string | null {
 export function getSessionName(cwd: string, instanceId?: string): string {
   const config = loadConfig();
   const strategy = config?.sessionStrategy ?? "per-directory";
+  const mainRoot = worktreeMainRootFor(cwd);
 
   // Repo-local config: anchor session identity to the PROJECT ROOT (the folder
   // that contains .honcho/), not Claude Code's transient working directory.
@@ -748,8 +1008,9 @@ export function getSessionName(cwd: string, instanceId?: string): string {
   // per-cwd session map (keyed by absolute paths, possibly stale/unrelated).
   // Granularity stays user-controlled: the nearest ancestor .honcho/ wins, so
   // dropping another .honcho/ in a subtree carves out its own session there.
+  // Worktrees keep deriving from the main repo's path (upstream default).
   const localDir = hasLocalConfig() ? getLocalConfigDir() : null;
-  let anchorCwd = cwd;
+  let anchorCwd = mainRoot ?? cwd;
   if (localDir) {
     const projectRoot = dirname(localDir);
     // splitSubmodules (opt-in): anchor each nested git repo (submodule) to its
@@ -764,47 +1025,41 @@ export function getSessionName(cwd: string, instanceId?: string): string {
   // Manual per-cwd overrides only apply on the default (no repo-local) path.
   // For chat-instance and git-branch, the session name is always derived dynamically.
   if (!localDir && strategy === "per-directory") {
-    const configuredSession = getSessionForPath(cwd);
+    const configuredSession = getSessionForPath(cwd, mainRoot);
     if (configuredSession) {
       return configuredSession;
     }
   }
 
-  const usePrefix = config?.sessionPeerPrefix !== false; // default true
-  const peerPart = config?.peerName ? sanitizeForSessionName(config.peerName) : "user";
-
   // An explicit `sessionName` in a repo-local config pins the whole project to
   // one fixed session name (peer-prefixed unless disabled), regardless of cwd
   // or strategy.
   if (localDir && config?.sessionName) {
+    const usePrefix = config?.sessionPeerPrefix !== false; // default true
+    const peerPart = config?.peerName ? sanitizeForSessionName(config.peerName) : "user";
     const pinned = sanitizeForSessionName(config.sessionName);
     return usePrefix ? `${peerPart}-${pinned}` : pinned;
   }
 
-  const repoPart = sanitizeForSessionName(basename(anchorCwd));
-  const base = usePrefix ? `${peerPart}-${repoPart}` : repoPart;
-
-  switch (strategy) {
-    case "git-branch": {
-      const gitState = captureGitState(anchorCwd);
-      if (gitState) {
-        const branchPart = sanitizeForSessionName(gitState.branch);
-        return `${base}-${branchPart}`;
-      }
-      return base;
-    }
-    case "chat-instance": {
-      // Prefer explicit instanceId > per-cwd cache > global cache (legacy)
-      const resolved = instanceId || getInstanceIdForCwd(cwd) || getClaudeInstanceId();
-      if (resolved) {
-        return usePrefix ? `${peerPart}-chat-${resolved}` : `chat-${resolved}`;
-      }
-      return base;
-    }
-    case "per-directory":
-    default:
-      return base;
+  // Resolve live env state, then delegate to the pure deriver.
+  let branch: string | undefined;
+  if (strategy === "git-branch") {
+    branch = captureGitState(cwd)?.branch;
   }
+  let resolvedInstanceId: string | undefined;
+  if (strategy === "chat-instance") {
+    // Prefer explicit instanceId > per-cwd cache > global cache (legacy)
+    resolvedInstanceId = instanceId || getInstanceIdForCwd(cwd) || getClaudeInstanceId() || undefined;
+  }
+
+  // Worktrees derive from the main repo's path (and a repo-local config from its
+  // project root); branch still comes from the worktree's own checkout above.
+  return deriveSessionName(strategy, anchorCwd, {
+    peerName: config?.peerName,
+    sessionPeerPrefix: config?.sessionPeerPrefix,
+    branch,
+    instanceId: resolvedInstanceId,
+  });
 }
 
 export function setSessionForPath(cwd: string, sessionName: string): void {
@@ -856,6 +1111,28 @@ export function getLocalContextConfig(): LocalContextConfig {
   return {
     maxEntries: config?.localContext?.maxEntries ?? 50,
   };
+}
+
+/**
+ * Resolved injection config with every field defaulted. Callers get a fully
+ * populated object so they never repeat the fallback literals. Config comes
+ * from parsed JSON, so absent keys simply don't appear — the spread over
+ * DEFAULT_INJECTION defaults them, while an explicit `[]` is preserved.
+ *
+ * Pass the already-loaded config (hooks have it in scope) to avoid a second
+ * disk read + parse on the per-turn hot path; omit it for a standalone lookup.
+ */
+export function getInjectionConfig(config?: HonchoCLAUDEConfig | null): Required<InjectionConfig> {
+  const injection = (config === undefined ? loadConfig() : config)?.injection;
+  const resolved = { ...DEFAULT_INJECTION, ...(injection ?? {}) };
+  // Guard hand-edited configs: a non-array component list falls back to the default.
+  resolved.perTurn = Array.isArray(resolved.perTurn)
+    ? normalizePerTurn(resolved.perTurn)
+    : DEFAULT_INJECTION.perTurn;
+  resolved.showContents = Array.isArray(resolved.showContents)
+    ? normalizePerTurn(resolved.showContents)
+    : DEFAULT_INJECTION.showContents;
+  return resolved;
 }
 
 export function isLoggingEnabled(): boolean {
@@ -934,7 +1211,7 @@ export function getHonchoClientOptions(config: HonchoCLAUDEConfig): HonchoClient
     apiKey: config.apiKey,
     baseURL: getHonchoBaseUrl(config),
     workspaceId: config.workspace,
-    timeout: 8000,
+    timeout: 120000,
     maxRetries: 1,
   };
 }

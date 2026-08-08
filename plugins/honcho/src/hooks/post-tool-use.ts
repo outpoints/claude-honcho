@@ -1,5 +1,5 @@
 import { Honcho } from "@honcho-ai/sdk";
-import { loadConfig, getSessionForPath, getSessionName, getHonchoClientOptions, isPluginEnabled, getCachedStdin } from "../config.js";
+import { loadConfig, getSessionForPath, getSessionName, getHonchoClientOptions, isPluginEnabled, getCachedStdin, readStdinText } from "../config.js";
 import { appendClaudeWork, getClaudeInstanceId } from "../cache.js";
 import { logHook, logApiCall, setLogContext } from "../log.js";
 import { visCapture } from "../visual.js";
@@ -198,7 +198,7 @@ export async function handlePostToolUse(): Promise<void> {
 
   let hookInput: HookInput = {};
   try {
-    const input = getCachedStdin() ?? await Bun.stdin.text();
+    const input = getCachedStdin() ?? await readStdinText();
     if (input.trim()) {
       hookInput = JSON.parse(input);
     }
@@ -232,8 +232,8 @@ export async function handlePostToolUse(): Promise<void> {
 }
 
 async function logToHonchoAsync(config: any, cwd: string, summary: string): Promise<void> {
-  // Skip if message saving is disabled
-  if (config.saveMessages === false) {
+  // Skip if message saving is disabled, or if [Tool] logging isn't opted in.
+  if (config.saveMessages === false || config.saveToolUse !== true) {
     return;
   }
 
