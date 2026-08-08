@@ -218,6 +218,7 @@ function handleGetConfig(cwd: string) {
   // Pre-render the status card
   const strategyLabels: Record<string, string> = {
     "per-directory": "per directory",
+    "per-repo": "per repository",
     "git-branch": "per git branch",
     "chat-instance": "per chat",
   };

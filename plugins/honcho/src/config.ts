@@ -1,5 +1,5 @@
 import { homedir } from "os";
-import { join, basename, dirname, resolve, sep } from "path";
+import { join, basename, dirname, resolve, relative, isAbsolute, parse, sep } from "path";
 import { fileURLToPath } from "url";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { captureGitState } from "./git.js";
@@ -140,7 +140,7 @@ export const DEFAULT_INJECTION: Required<InjectionConfig> = {
 export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "max"] as const;
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 
-export type SessionStrategy = "per-directory" | "git-branch" | "chat-instance";
+export type SessionStrategy = "per-directory" | "per-repo" | "git-branch" | "chat-instance";
 
 export type StatuslineMode = "on" | "off";
 
@@ -358,7 +358,7 @@ export interface HonchoCLAUDEConfig {
   /** AI peer name (resolved per-host, e.g. "claude" for claude-code) */
   aiPeer: string;
 
-  /** How sessions are named: per-directory, git-branch, or chat-instance */
+  /** How sessions are named: per-directory, per-repo, git-branch, or chat-instance */
   sessionStrategy?: SessionStrategy;
   /** Prefix session names with peerName (default: true, disable for solo use) */
   sessionPeerPrefix?: boolean;
@@ -661,17 +661,25 @@ export function findLocalConfigDir(startCwd: string): string | null {
 
 /**
  * Walk up from `startCwd` to find the nearest git repository root (a dir with a
- * `.git` file or directory — submodules use a `.git` file), without going above
- * `stopAtDir` (the project root). Returns null if none is found within bounds.
- * Used by `splitSubmodules` to anchor each nested git repo to its own session.
+ * `.git` file or directory — worktrees and submodules use a `.git` file).
+ * When `stopAtDir` is provided, never search above that project root and return
+ * null if `startCwd` sits outside it. Without it the walk runs to the filesystem
+ * root. Used by the `per-repo` strategy and repo-local `splitSubmodules`.
  */
-export function findNearestGitRoot(startCwd: string, stopAtDir: string): string | null {
+export function findNearestGitRoot(startCwd: string, stopAtDir?: string): string | null {
   try {
-    const stop = resolve(stopAtDir);
     let dir = resolve(startCwd);
+    const stop = stopAtDir ? resolve(stopAtDir) : parse(dir).root;
+
+    const relativeToStop = relative(stop, dir);
+    const outsideBoundary = relativeToStop === ".."
+      || relativeToStop.startsWith(`..${sep}`)
+      || isAbsolute(relativeToStop);
+    if (outsideBoundary) return null;
+
     for (let i = 0; i < 64; i++) {
-      if (existsSync(join(dir, ".git"))) return dir; // .git file (submodule) or dir
-      if (dir === stop) break;                        // don't search above the project root
+      if (existsSync(join(dir, ".git"))) return dir; // .git file (worktree/submodule) or dir
+      if (dir === stop) break;                        // don't search above the boundary
       const parent = dirname(dir);
       if (parent === dir) break;
       dir = parent;
@@ -984,6 +992,7 @@ export function deriveSessionName(
       }
       return base;
     }
+    case "per-repo":
     case "per-directory":
     default:
       return base;
@@ -1008,11 +1017,16 @@ export function getSessionName(cwd: string, instanceId?: string): string {
   // per-cwd session map (keyed by absolute paths, possibly stale/unrelated).
   // Granularity stays user-controlled: the nearest ancestor .honcho/ wins, so
   // dropping another .honcho/ in a subtree carves out its own session there.
-  // Worktrees keep deriving from the main repo's path (upstream default).
   const localDir = hasLocalConfig() ? getLocalConfigDir() : null;
-  let anchorCwd = mainRoot ?? cwd;
-  if (localDir) {
-    const projectRoot = dirname(localDir);
+  const projectRoot = localDir ? dirname(localDir) : null;
+
+  let anchorCwd: string;
+  if (strategy === "per-repo") {
+    // per-repo: anchor to the nearest git root, so subdirectories of a repo all
+    // share one session while worktrees and nested repos each get their own.
+    // A repo-local config bounds the walk to its project root.
+    anchorCwd = findNearestGitRoot(cwd, projectRoot ?? undefined) ?? projectRoot ?? cwd;
+  } else if (projectRoot) {
     // splitSubmodules (opt-in): anchor each nested git repo (submodule) to its
     // own session, bounded to within the project root; otherwise the whole tree
     // anchors to the project root. Workspace is unaffected — it's still resolved
@@ -1020,6 +1034,9 @@ export function getSessionName(cwd: string, instanceId?: string): string {
     anchorCwd = config?.splitSubmodules
       ? (findNearestGitRoot(cwd, projectRoot) ?? projectRoot)
       : projectRoot;
+  } else {
+    // Default path: worktrees keep deriving from the main repo's path.
+    anchorCwd = mainRoot ?? cwd;
   }
 
   // Manual per-cwd overrides only apply on the default (no repo-local) path.

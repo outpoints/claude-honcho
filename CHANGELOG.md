@@ -2,6 +2,16 @@
 
 All notable changes to claude-honcho will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `sessionStrategy: "per-repo"` maps every working directory to its nearest Git repository root, so subfolders of a repo share one session while worktrees and nested repos (detected via `.git` directories *or* files) each get their own. Outside Git it falls back to `per-directory`, and a repo-local config bounds discovery to the project tree — giving the `splitSubmodules` split without needing that flag.
+
+### Changed
+
+- The workspace-scoped injected-context cache now covers the assistant-context slot only, matching upstream's injection refactor (v0.2.7+), which no longer caches user context at all.
+
 ## [0.2.11] - 2026-07-31
 
 ### Added

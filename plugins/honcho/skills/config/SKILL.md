@@ -35,7 +35,7 @@ AskUserQuestion:
     - label: "Peers"
       description: "Your name and AI name (currently: {resolved.peerName} / {resolved.aiPeer})"
     - label: "Session mapping"
-      description: "How sessions are named — per directory, git branch, or per chat (currently: {resolved.sessionStrategy})"
+      description: "How sessions are named — per directory, git repository, git branch, or per chat (currently: {resolved.sessionStrategy})"
     - label: "Workspace"
       description: "Data space and session scope (currently: {resolved.workspace})"
     - label: "Memory injection"
@@ -95,6 +95,8 @@ AskUserQuestion:
   options:
     - label: "per-directory (Recommended)"
       description: "{peer}-{repo} — one session per project"
+    - label: "per-repo"
+      description: "{peer}-{git-root} — subfolders share their repository session"
     - label: "git-branch"
       description: "{peer}-{repo}-{branch} — session follows branch"
     - label: "chat-instance"

@@ -120,7 +120,7 @@ to the peer name you chose in your environment: it will carry across different p
 - **Persistent Memory** — Claude remembers your preferences, projects, and context across sessions
 - **Survives Context Wipes** — Even when Claude's context window resets, memory persists
 - **Git Awareness** — Detects branch switches, commits, and changes made outside Claude
-- **Flexible Sessions** — Map sessions per directory, per git branch, or per chat instance
+- **Flexible Sessions** — Map sessions per directory, per Git repository, per git branch, or per chat instance
 - **AI Self-Awareness** — Claude knows what it was working on, even after restarts
 - **Cross-Tool Context** — Link workspaces across Claude Code, Cursor, and other hosts so context flows between tools
 - **Team Support** — Multiple people can share a workspace and build context together
@@ -169,7 +169,7 @@ The repo-local file uses the same schema as the global one, and **only the field
 With this in place, every session you run inside that repo (and its subfolders) records its memory in `my-research-project` instead of your default workspace. Notes:
 
 - **Subfolders are covered automatically.** You only need **one** `.honcho/` at the project root — the plugin walks up from the working directory to find it. Even when Claude Code's working directory is a subfolder (e.g. `…/research/branding-research`), the whole project records to one session named after the project root, instead of a separate session per subfolder. Want a specific session name? Add `"sessionName": "my-project"`. Need a subtree to be its own workspace/session? Drop another `.honcho/` there — the nearest one wins.
-- **Nested git submodules can split out.** If your project has submodules (nested git repos) and you want each tracked as its own session, add `"splitSubmodules": true` to the project-root `.honcho/config.json`. Each submodule then gets its own session (named after the submodule folder) while **inheriting the project's workspace** — no `.honcho` needed inside the submodules. A submodule that *does* have its own `.honcho/` keeps full control (its own workspace and session).
+- **Nested git submodules can split out.** If your project has submodules (nested git repos) and you want each tracked as its own session, add `"splitSubmodules": true` to the project-root `.honcho/config.json`. Each submodule then gets its own session (named after the submodule folder) while **inheriting the project's workspace** — no `.honcho` needed inside the submodules. A submodule that *does* have its own `.honcho/` keeps full control (its own workspace and session). Setting `"sessionStrategy": "per-repo"` achieves the same nested-repo split without `splitSubmodules`, and applies the same rule globally.
 - **Secrets stay global.** Keep your `apiKey` in `~/.honcho/config.json` so it never lands in a repo. The repo file only needs the overrides — which means it's safe to commit and share across machines.
 - **Read-only to the plugin.** The plugin never writes to the repo file — you manage it. `/honcho:status` shows when a repo-local config is active; while one is active, `set_config` won't modify it and points you to edit the repo file directly.
 - **Caches are shared** in `~/.honcho/` — context hints are keyed by workspace, and per-project session/git state by directory — so nothing collides between projects.
@@ -185,12 +185,12 @@ With this in place, every session you run inside that repo (and its subfolders) 
   "aiPeer": "claude",                   // the AI's identity in this workspace
 
   // --- Session shaping ---
-  "sessionStrategy": "per-directory",   // "per-directory" | "git-branch" | "chat-instance"
+  "sessionStrategy": "per-directory",   // "per-directory" | "per-repo" | "git-branch" | "chat-instance"
   "sessionPeerPrefix": true,            // prefix session names with peerName
   "sessionName": "my-research-project", // pin ONE session name for the whole project tree
                                         //   (if set, this wins over splitSubmodules below)
   "splitSubmodules": true,              // nested git submodules each get their own session
-                                        //   (ignored when sessionName is set)
+                                        //   (not needed with per-repo; ignored when sessionName is set)
 
   // --- Behavior ---
   "observationMode": "unified",         // "unified" | "directional"
@@ -256,7 +256,7 @@ With this in place, every session you run inside that repo (and its subfolders) 
   },
 
   // Session mapping
-  "sessionStrategy": "per-directory", // "per-directory" | "git-branch" | "chat-instance"
+  "sessionStrategy": "per-directory", // "per-directory" | "per-repo" | "git-branch" | "chat-instance"
   "sessionPeerPrefix": true,          // Prefix session names with peerName (default: true)
 
   // Message handling
@@ -300,6 +300,7 @@ Session strategy controls how Honcho maps your conversations to sessions. Change
 | Strategy | Behavior | Best for |
 | --- | --- | --- |
 | `per-directory` (default) | One session per project directory. Stable across restarts. | Most users — each project accumulates its own memory |
+| `per-repo` | One session per nearest Git repository root. Subdirectories share it; worktrees and nested repos are detected via either `.git` directories or files and get their own. Outside Git, falls back to `per-directory`. | Monorepos and workflows that launch Claude from different subdirectories |
 | `git-branch` | Session name includes the current git branch. Switching branches switches sessions. | Feature-branch workflows where context per branch matters |
 | `chat-instance` | Each Claude Code chat gets its own session. No continuity between restarts. | Ephemeral usage, experimentation, or when you want a clean slate each time |
 

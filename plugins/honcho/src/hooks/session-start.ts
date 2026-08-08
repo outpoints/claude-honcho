@@ -128,9 +128,9 @@ export async function handleSessionStart(): Promise<void> {
       : [userPeer, aiPeer];
     await session.addPeers(peers);
 
-    // Only persist session names for per-directory strategy (stable names).
-    // Dynamic strategies (git-branch, chat-instance) change per session,
-    // so locking them as overrides defeats the purpose.
+    // Only persist manual mappings for per-directory. Other strategies derive
+    // their identity from repository, branch, or chat state, so locking them as
+    // per-cwd overrides would defeat the selected mapping.
     if (!getSessionForPath(cwd) && (!config.sessionStrategy || config.sessionStrategy === "per-directory")) {
       setSessionForPath(cwd, sessionName);
     }
