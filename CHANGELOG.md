@@ -12,6 +12,13 @@ All notable changes to claude-honcho will be documented in this file.
 
 - The workspace-scoped injected-context cache now covers the assistant-context slot only, matching upstream's injection refactor (v0.2.7+), which no longer caches user context at all.
 
+### Fixed
+
+- Skill runners ignored repo-local `.honcho/config.json`. Only the hooks and the MCP server registered the overlay, so `/honcho:status` reported the *global* workspace, peer, and session name while the hooks were reading and writing the repo-local ones — the status was simply wrong in any project with its own config. `/honcho:status` now resolves the same config the hooks do, and names the active repo-local file.
+- `/honcho:import` (backfill) sent every project's transcripts to a single workspace, ignoring the repo-local config of the projects it was importing. A backfill run walks transcripts from every project on the machine, so each transcript's cwd is now resolved against its own nearest `.honcho/config.json`: projects pinned to their own workspace backfill into that workspace, everything else keeps the global one, and `--workspace` still forces one target for the whole run. The import ledger is tracked per workspace, so a failure in one no longer blocks the others from being marked complete.
+- Backfilled session names now match the names live hooks produce. `getSessionName()`'s anchoring rules (`per-repo` git-root resolution, repo-local project-root anchoring, `sessionName` pinning) are extracted into a shared `resolveSessionName()` used by both paths — previously the backfill called the low-level deriver directly, so a `per-repo` project imported from a subdirectory was named after the subdirectory.
+- `/honcho:setup` writes the global config, but said nothing when a repo-local config shadows it in the current directory. It now points at the file that overrides it.
+
 ## [0.2.11] - 2026-07-31
 
 ### Added

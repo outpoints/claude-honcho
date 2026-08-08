@@ -18,9 +18,12 @@ import {
   loadConfig,
   getHonchoClientOptions,
   getObservationMode,
-  deriveSessionName,
+  resolveSessionName,
+  findLocalConfigDir,
+  setLocalConfigContext,
   getConfigDir,
   setDetectedHost,
+  type HonchoCLAUDEConfig,
   type SessionStrategy,
 } from "../config.js";
 import { addMessagesBatched, chunkContent } from "../cache.js";
@@ -102,19 +105,62 @@ export function findTranscripts(days: number): Array<{ path: string; mtimeMs: nu
 
 interface SessionGroup {
   name: string;
+  workspace: string;
   messages: Array<ParsedMessage & { sourceTranscript: string }>;
 }
 
-/** Group all messages into Honcho sessions, naming each via the configured strategy
- *  and per-message cwd/branch (+ the transcript uuid for chat-instance). */
+/** Effective config for one transcript's cwd. */
+interface CwdConfig {
+  config: HonchoCLAUDEConfig;
+  localDir: string | null;
+}
+
+/**
+ * Resolve config per working directory, honoring each project's repo-local
+ * `.honcho/config.json`.
+ *
+ * A backfill run walks transcripts from *every* project on the machine, so the
+ * ambient local-config context (the directory the command was launched from)
+ * must not be applied globally — that would import every project's history into
+ * whatever workspace the current repo happens to declare. Each cwd is resolved
+ * against its own nearest `.honcho/`, so a repo pinned to its own workspace
+ * backfills into that workspace and everything else keeps the global one.
+ *
+ * Memoized on the resolved `.honcho` dir: one config read per project rather
+ * than one per message.
+ */
+function makeCwdConfigResolver(globalConfig: HonchoCLAUDEConfig): (cwd: string) => CwdConfig {
+  const byLocalDir = new Map<string, CwdConfig>();
+  return (cwd: string): CwdConfig => {
+    const localDir = findLocalConfigDir(cwd);
+    const key = localDir ?? "";
+    const memo = byLocalDir.get(key);
+    if (memo) return memo;
+
+    setLocalConfigContext(cwd);
+    const resolved: CwdConfig = { config: loadConfig() ?? globalConfig, localDir };
+    byLocalDir.set(key, resolved);
+    return resolved;
+  };
+}
+
+/** Group all messages into Honcho sessions, naming each via the strategy that
+ *  applies to that message's cwd and the per-message cwd/branch (+ the transcript
+ *  uuid for chat-instance). Sessions carry the workspace they belong to. */
 export function groupIntoSessions(
   transcripts: Array<{ path: string; mtimeMs: number }>,
-  strategy: SessionStrategy,
-  peerName: string | undefined,
-  sessionPeerPrefix: boolean | undefined,
-  sessionOverrides: Record<string, string> = {}
-): { groups: Map<string, SessionGroup>; parsed: number; empty: number } {
+  globalConfig: HonchoCLAUDEConfig,
+  sessionOverrides: Record<string, string> = {},
+  workspaceOverride?: string
+): {
+  groups: Map<string, SessionGroup>;
+  parsed: number;
+  empty: number;
+  transcriptWorkspaces: Map<string, Set<string>>;
+} {
   const groups = new Map<string, SessionGroup>();
+  const transcriptWorkspaces = new Map<string, Set<string>>();
+  const configFor = makeCwdConfigResolver(globalConfig);
   let parsed = 0;
   let empty = 0;
 
@@ -129,26 +175,41 @@ export function groupIntoSessions(
     for (const msg of messages) {
       const cwd = msg.cwd || tCwd;
       if (!cwd) continue; // can't name a session without a directory
+
+      const { config, localDir } = configFor(cwd);
+      const strategy: SessionStrategy = config.sessionStrategy ?? "per-directory";
+      const workspace = workspaceOverride ?? config.workspace;
+
       // Honor manual per-directory overrides exactly as getSessionName() does,
-      // so backfilled sessions share names with future live sessions.
+      // so backfilled sessions share names with future live sessions. Repo-local
+      // projects ignore the global override map, same as the live path.
       const name =
-        strategy === "per-directory" && sessionOverrides[cwd]
+        !localDir && strategy === "per-directory" && sessionOverrides[cwd]
           ? sessionOverrides[cwd]
-          : deriveSessionName(strategy, cwd, {
-              peerName,
-              sessionPeerPrefix,
+          : resolveSessionName(cwd, config, {
               branch: msg.gitBranch || tBranch,
               instanceId: sessionId,
+              localDir,
             });
-      let group = groups.get(name);
+
+      // Same session name can exist in two workspaces — key on both.
+      const key = `${workspace}::${name}`;
+      let group = groups.get(key);
       if (!group) {
-        group = { name, messages: [] };
-        groups.set(name, group);
+        group = { name, workspace, messages: [] };
+        groups.set(key, group);
       }
       group.messages.push({ ...msg, sourceTranscript: source });
+
+      let seen = transcriptWorkspaces.get(path);
+      if (!seen) {
+        seen = new Set<string>();
+        transcriptWorkspaces.set(path, seen);
+      }
+      seen.add(workspace);
     }
   }
-  return { groups, parsed, empty };
+  return { groups, parsed, empty, transcriptWorkspaces };
 }
 
 async function run(): Promise<void> {
@@ -165,26 +226,46 @@ async function run(): Promise<void> {
     process.exit(1);
   }
 
-  const targetWorkspace = args.workspace || config.workspace;
   const strategy: SessionStrategy = config.sessionStrategy ?? "per-directory";
+  // Where transcripts land when no repo-local config claims them.
+  const defaultWorkspace = args.workspace ?? config.workspace;
 
-  console.log(`  ${s.label("Workspace")}:   ${targetWorkspace}${args.workspace ? s.dim("  (override)") : ""}`);
-  console.log(`  ${s.label("Strategy")}:    ${strategy}`);
+  console.log(
+    `  ${s.label("Workspace")}:   ${
+      args.workspace
+        ? `${args.workspace}${s.dim("  (override — all transcripts)")}`
+        : `${config.workspace}${s.dim("  (default — repo-local configs route their own)")}`
+    }`
+  );
+  console.log(`  ${s.label("Strategy")}:    ${strategy}${s.dim("  (default)")}`);
   console.log(`  ${s.label("Window")}:      last ${args.days} days`);
   console.log(`  ${s.label("User peer")}:   ${config.peerName}`);
   console.log(`  ${s.label("AI peer")}:     ${config.aiPeer}`);
   console.log("");
 
-  // Discover + filter transcripts
+  // Discover + filter transcripts.
+  // A transcript's workspace isn't known until its cwd is parsed, so without an
+  // explicit --workspace the ledger is consulted across all workspaces: a
+  // transcript already imported at this mtime is done, wherever it landed.
   const allTranscripts = findTranscripts(args.days);
   const state = loadState();
-  const already = allTranscripts.filter((t) => state.imported[`${targetWorkspace}::${t.path}`] === t.mtimeMs);
-  const todo = allTranscripts.filter((t) => state.imported[`${targetWorkspace}::${t.path}`] !== t.mtimeMs);
+  const importedMtimeByPath = new Map<string, number>();
+  for (const [key, mtimeMs] of Object.entries(state.imported)) {
+    const sep = key.indexOf("::");
+    if (sep === -1) continue;
+    importedMtimeByPath.set(key.slice(sep + 2), mtimeMs);
+  }
+  const isImported = (t: { path: string; mtimeMs: number }): boolean =>
+    args.workspace
+      ? state.imported[`${args.workspace}::${t.path}`] === t.mtimeMs
+      : importedMtimeByPath.get(t.path) === t.mtimeMs;
+  const already = allTranscripts.filter(isImported);
+  const todo = allTranscripts.filter((t) => !isImported(t));
 
   console.log(s.section("Scanning transcripts"));
   console.log(s.listItem(`${allTranscripts.length} transcript(s) in window`));
   if (already.length > 0) {
-    console.log(s.listItem(s.dim(`${already.length} already imported into ${targetWorkspace} — skipping`)));
+    console.log(s.listItem(s.dim(`${already.length} already imported — skipping`)));
   }
   if (todo.length === 0) {
     console.log("");
@@ -193,12 +274,11 @@ async function run(): Promise<void> {
   }
 
   // Group into sessions
-  const { groups, parsed, empty } = groupIntoSessions(
+  const { groups, parsed, empty, transcriptWorkspaces } = groupIntoSessions(
     todo,
-    strategy,
-    config.peerName,
-    config.sessionPeerPrefix,
-    config.sessions ?? {}
+    config,
+    config.sessions ?? {},
+    args.workspace
   );
   const totalMessages = [...groups.values()].reduce((n, g) => n + g.messages.length, 0);
 
@@ -209,8 +289,10 @@ async function run(): Promise<void> {
   // Show a preview of session names + counts (cap the printed list)
   console.log(s.section("Sessions"));
   const sorted = [...groups.values()].sort((a, b) => b.messages.length - a.messages.length);
+  const multiWorkspace = new Set(sorted.map((g) => g.workspace)).size > 1;
   for (const g of sorted.slice(0, 15)) {
-    console.log(s.listItem(`${g.name} ${s.dim(`(${g.messages.length} msg)`)}`));
+    const where = multiWorkspace ? s.dim(`  → ${g.workspace}`) : "";
+    console.log(s.listItem(`${g.name} ${s.dim(`(${g.messages.length} msg)`)}${where}`));
   }
   if (sorted.length > 15) console.log(s.listItem(s.dim(`… and ${sorted.length - 15} more`)));
   console.log("");
@@ -220,22 +302,35 @@ async function run(): Promise<void> {
     process.exit(0);
   }
 
-  // Upload
-  const opts = getHonchoClientOptions(config);
-  opts.workspaceId = targetWorkspace;
-  // Backfilling large histories: give the network more headroom than the hooks.
-  opts.timeout = 60_000;
-  opts.maxRetries = 3;
-  const honcho = new Honcho(opts);
+  // Upload. One client per target workspace — a run can span several when
+  // projects carry their own repo-local config.
+  const clients = new Map<string, Honcho>();
+  const clientFor = (workspace: string): Honcho => {
+    let client = clients.get(workspace);
+    if (!client) {
+      const opts = getHonchoClientOptions(config);
+      opts.workspaceId = workspace;
+      // Backfilling large histories: give the network more headroom than the hooks.
+      opts.timeout = 60_000;
+      opts.maxRetries = 3;
+      client = new Honcho(opts);
+      clients.set(workspace, client);
+    }
+    return client;
+  };
   const observationMode = getObservationMode(config);
 
-  console.log(s.section(`Uploading to ${targetWorkspace}`));
+  const workspaceList = [...new Set(sorted.map((g) => g.workspace))];
+  if (workspaceList.length === 0) workspaceList.push(defaultWorkspace);
+  console.log(s.section(`Uploading to ${workspaceList.join(", ")}`));
 
   let uploadedSessions = 0;
   let uploadedMessages = 0;
   const errors: string[] = [];
+  const failedWorkspaces = new Set<string>();
 
   for (const g of sorted) {
+    const honcho = clientFor(g.workspace);
     try {
       const [session, userPeer, aiPeer] = await Promise.all([
         honcho.session(g.name),
@@ -272,22 +367,28 @@ async function run(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`${g.name}: ${msg}`);
+      failedWorkspaces.add(g.workspace);
       console.log(s.listItem(s.warn(`${g.name} — ${msg}`)));
     }
   }
 
-  // Only mark imported on a fully clean run; leave failures unmarked so a re-run retries.
-  if (errors.length === 0) {
-    for (const t of todo) {
-      state.imported[`${targetWorkspace}::${t.path}`] = t.mtimeMs;
+  // Mark a transcript imported only for workspaces that took it cleanly; a
+  // workspace with any failure stays unmarked so a re-run retries just that one.
+  for (const t of todo) {
+    // Transcripts that parsed empty produced no group — mark them so they are
+    // not re-scanned every run.
+    const targets = transcriptWorkspaces.get(t.path) ?? new Set([defaultWorkspace]);
+    for (const workspace of targets) {
+      if (failedWorkspaces.has(workspace)) continue;
+      state.imported[`${workspace}::${t.path}`] = t.mtimeMs;
     }
-    saveState(state);
   }
+  saveState(state);
 
   console.log("");
   console.log(
     s.success(
-      `Imported ${uploadedMessages} message(s) across ${uploadedSessions} session(s) into ${targetWorkspace}.`
+      `Imported ${uploadedMessages} message(s) across ${uploadedSessions} session(s) into ${workspaceList.join(", ")}.`
     )
   );
   if (errors.length > 0) {

@@ -999,13 +999,22 @@ export function deriveSessionName(
   }
 }
 
-/** Session name derived from strategy. Manual overrides only apply to per-directory.
- *  @param instanceId - Explicit instance ID for chat-instance strategy. Falls back to
- *                      per-cwd cache, then global cache. Callers should pass hookInput.session_id
- *                      when available to avoid cross-session collision from the global cache.
+/** Session name from an explicit config and explicit live inputs.
+ *
+ *  Shared by getSessionName() (live hooks, which read branch/instance from the
+ *  environment) and the backfill runner (which reads them from the transcript),
+ *  so a backfilled session lands on the same name a live session would.
+ *
+ *  @param localDir - Repo-local `.honcho` dir for `cwd`. Defaults to the
+ *                    ambient context registered by setLocalConfigContext();
+ *                    pass it explicitly when resolving a cwd other than the
+ *                    ambient one (backfill walks many projects in one run).
  */
-export function getSessionName(cwd: string, instanceId?: string): string {
-  const config = loadConfig();
+export function resolveSessionName(
+  cwd: string,
+  config: HonchoCLAUDEConfig | null,
+  opts: { branch?: string; instanceId?: string; localDir?: string | null } = {}
+): string {
   const strategy = config?.sessionStrategy ?? "per-directory";
   const mainRoot = worktreeMainRootFor(cwd);
 
@@ -1017,7 +1026,8 @@ export function getSessionName(cwd: string, instanceId?: string): string {
   // per-cwd session map (keyed by absolute paths, possibly stale/unrelated).
   // Granularity stays user-controlled: the nearest ancestor .honcho/ wins, so
   // dropping another .honcho/ in a subtree carves out its own session there.
-  const localDir = hasLocalConfig() ? getLocalConfigDir() : null;
+  const localDir =
+    opts.localDir !== undefined ? opts.localDir : hasLocalConfig() ? getLocalConfigDir() : null;
   const projectRoot = localDir ? dirname(localDir) : null;
 
   let anchorCwd: string;
@@ -1058,7 +1068,26 @@ export function getSessionName(cwd: string, instanceId?: string): string {
     return usePrefix ? `${peerPart}-${pinned}` : pinned;
   }
 
-  // Resolve live env state, then delegate to the pure deriver.
+  // Worktrees derive from the main repo's path (and a repo-local config from its
+  // project root); branch still comes from the worktree's own checkout.
+  return deriveSessionName(strategy, anchorCwd, {
+    peerName: config?.peerName,
+    sessionPeerPrefix: config?.sessionPeerPrefix,
+    branch: opts.branch,
+    instanceId: opts.instanceId,
+  });
+}
+
+/** Session name derived from strategy. Manual overrides only apply to per-directory.
+ *  @param instanceId - Explicit instance ID for chat-instance strategy. Falls back to
+ *                      per-cwd cache, then global cache. Callers should pass hookInput.session_id
+ *                      when available to avoid cross-session collision from the global cache.
+ */
+export function getSessionName(cwd: string, instanceId?: string): string {
+  const config = loadConfig();
+  const strategy = config?.sessionStrategy ?? "per-directory";
+
+  // Resolve live env state, then delegate to the shared resolver.
   let branch: string | undefined;
   if (strategy === "git-branch") {
     branch = captureGitState(cwd)?.branch;
@@ -1069,14 +1098,7 @@ export function getSessionName(cwd: string, instanceId?: string): string {
     resolvedInstanceId = instanceId || getInstanceIdForCwd(cwd) || getClaudeInstanceId() || undefined;
   }
 
-  // Worktrees derive from the main repo's path (and a repo-local config from its
-  // project root); branch still comes from the worktree's own checkout above.
-  return deriveSessionName(strategy, anchorCwd, {
-    peerName: config?.peerName,
-    sessionPeerPrefix: config?.sessionPeerPrefix,
-    branch,
-    instanceId: resolvedInstanceId,
-  });
+  return resolveSessionName(cwd, config, { branch, instanceId: resolvedInstanceId });
 }
 
 export function setSessionForPath(cwd: string, sessionName: string): void {

@@ -5,13 +5,27 @@
  */
 import { Honcho, type Page, type Conclusion } from "@honcho-ai/sdk";
 import type { QueueStatus } from "@honcho-ai/sdk";
-import { loadConfig, getHonchoClientOptions, getEndpointInfo, getSessionName } from "../config.js";
+import {
+  loadConfig,
+  getHonchoClientOptions,
+  getEndpointInfo,
+  getSessionName,
+  setLocalConfigContext,
+  getLocalConfigPath,
+  hasLocalConfig,
+} from "../config.js";
 import * as s from "../styles.js";
 
 async function status(): Promise<void> {
   console.log("");
   console.log(s.header("honcho status"));
   console.log("");
+
+  // Register the repo-local `.honcho/config.json` overlay for this working tree
+  // before reading config, exactly as the hooks and the MCP server do. Without
+  // it this command reports the *global* workspace/peer/session while the hooks
+  // are writing to the repo-local one — the status is then simply wrong.
+  setLocalConfigContext(process.cwd());
 
   const config = loadConfig();
   if (!config) {
@@ -42,6 +56,9 @@ async function status(): Promise<void> {
     console.log(`  ${s.label("Workspace")}:   ${config.workspace} ${s.dim(`@ ${endpointInfo.url}`)}`);
     console.log(`  ${s.label("Session")}:     ${getSessionName(process.cwd())}`);
     console.log(`  ${s.label("Peers")}:       ${config.peerName} / ${config.aiPeer}`);
+    if (hasLocalConfig()) {
+      console.log(`  ${s.label("Config")}:      ${s.dim(`repo-local — ${getLocalConfigPath()}`)}`);
+    }
 
     // Observation queue — messages being processed into conclusions
     if (queueResult.status === "fulfilled") {

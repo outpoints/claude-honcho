@@ -15,6 +15,7 @@ import {
   getClaudeSettingsPath,
   getClaudeSettingsDir,
   saveRootField,
+  findLocalConfigDir,
 } from "../config.js";
 import * as s from "../styles.js";
 import { copyFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -193,6 +194,19 @@ async function setup(): Promise<void> {
     console.log("");
   } else {
     console.log(s.dim(`Config already exists at ${getConfigPath()}`));
+    console.log("");
+  }
+
+  // Setup owns the GLOBAL config. A repo-local `.honcho/config.json` in the
+  // current tree overrides it for this project, so say so plainly here — the
+  // alternative is a user setting a workspace and never seeing it take effect
+  // in the repo they ran setup from. Deliberately not applied to this run:
+  // setup must read and write the global file, not the overlay.
+  const localDir = findLocalConfigDir(process.cwd());
+  if (localDir) {
+    console.log(s.warn("A repo-local config overrides these settings here"));
+    console.log(s.dim(`  ${join(localDir, "config.json")}`));
+    console.log(s.dim("  Edit that file to change workspace/peer for this project."));
     console.log("");
   }
 
