@@ -1,7 +1,7 @@
 import { Honcho } from "@honcho-ai/sdk";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, getSessionName, getHonchoClientOptions, isPluginEnabled, getCachedStdin, readStdinText, getObservationMode, getInjectionConfig, type InjectionConfig, type PerTurnComponent } from "../config.js";
+import { initHook, loadConfig, getSessionName, getHonchoClientOptions, isPluginEnabled, getCachedStdin, readStdinText, getObservationMode, getInjectionConfig, type InjectionConfig, type PerTurnComponent } from "../config.js";
 import {
   getMessageCount,
   incrementMessageCount,
@@ -12,6 +12,7 @@ import { visInjectionMessage, visDialecticMessage, visSessionContextMessage, vis
 import type { ReasoningLevel } from "../config.js";
 import { honchoSessionUrl } from "../styles.js";
 import { setMemoryState, setSessionLink } from "../state.js";
+import { TRIVIAL_REPLY_PATTERN, isHarnessInjected, stripLeadingReminders } from "../prompt-filters.js";
 
 interface HookInput {
   prompt?: string;
@@ -20,38 +21,11 @@ interface HookInput {
   workspace_roots?: string[];
 }
 
-// Terse acknowledgements
-const TRIVIAL_REPLY_PATTERN = /^(yes|no|ok|sure|thanks|y|n|yep|nope|yeah|nah|continue|go ahead|do it|proceed)$/i;
-
-export function isTerseReply(prompt: string): boolean {
-  return TRIVIAL_REPLY_PATTERN.test(prompt.trim());
-}
-
 // Patterns to skip context injection
 const SKIP_CONTEXT_PATTERNS = [
   TRIVIAL_REPLY_PATTERN,
   /^\//, // slash commands
 ];
-
-// Harness-injected turns that Claude Code delivers in the user-message slot but
-// the human never typed: background-task events, slash-command stdout, injected
-// system reminders.
-const HARNESS_INJECTED_PATTERNS = [
-  /^<task-notification>/,
-  /^<local-command-stdout>/,
-  /^<command-name>/,
-  /^<command-message>/,
-  /^<system-reminder>/,
-  /^<bash-(stdout|stderr|input)>/,
-  // `<<...>>` sentinels the runtime re-submits through the user slot and
-  // resolves at fire time (e.g. <<autonomous-loop-dynamic>> from /loop wakeups)
-  /^<<[\w-]+>>$/,
-];
-
-export function isHarnessInjected(prompt: string): boolean {
-  const trimmed = prompt.trim();
-  return HARNESS_INJECTED_PATTERNS.some((p) => p.test(trimmed));
-}
 
 const FETCH_TIMEOUT_MS = 4000;
 // The dialectic chat() call is far slower than context() (~12s at medium, up to
@@ -204,7 +178,8 @@ export async function handleUserPrompt(): Promise<void> {
 
   // Skip trivial prompts — no context needed for "y", "ok", etc. Harness-injected
   // turns are excluded from storage; don't use them as retrieval queries either.
-  if (isHarnessInjected(prompt) || shouldSkipContextRetrieval(prompt)) {
+  const userPrompt = stripLeadingReminders(prompt);
+  if (isHarnessInjected(prompt) || shouldSkipContextRetrieval(userPrompt)) {
     logHook("user-prompt", "Skipping context (harness-injected or trivial prompt)");
     visSkipMessage("user-prompt", sessionLink ? `${sessionLink} · skipped` : "skipped");
     process.exit(0);
@@ -229,10 +204,10 @@ export async function handleUserPrompt(): Promise<void> {
   // and the hook completes as soon as the slowest selected component resolves or
   // times out.
   const [userCtxResult, assistantCtxResult, sessionCtx, dialectic] = await Promise.all([
-    wantUserContext ? raceTimeout(fetchUserContext(config, prompt, injection), FETCH_TIMEOUT_MS) : Promise.resolve(null),
-    wantAssistantContext ? raceTimeout(fetchAssistantContext(config, prompt, injection), FETCH_TIMEOUT_MS) : Promise.resolve(null),
+    wantUserContext ? raceTimeout(fetchUserContext(config, userPrompt, injection), FETCH_TIMEOUT_MS) : Promise.resolve(null),
+    wantAssistantContext ? raceTimeout(fetchAssistantContext(config, userPrompt, injection), FETCH_TIMEOUT_MS) : Promise.resolve(null),
     wantSessionContext ? raceTimeout(fetchSessionContext(config, sessionName, injection), FETCH_TIMEOUT_MS) : Promise.resolve(null),
-    wantDialectic ? raceTimeout(fetchDialectic(config, prompt, injection), DIALECTIC_TIMEOUT_MS) : Promise.resolve(null),
+    wantDialectic ? raceTimeout(fetchDialectic(config, userPrompt, injection), DIALECTIC_TIMEOUT_MS) : Promise.resolve(null),
   ]);
 
   const userCtx: { context: any; matched?: string[]; queryLabel?: string } | null =
@@ -497,4 +472,10 @@ function outputContext(peerName: string, contextParts: string[], systemMsg?: str
     output = addSystemMessage(output, systemMsg);
   }
   console.log(JSON.stringify(output));
+}
+
+/** Entry point: reads stdin once, then runs the handler. */
+export async function main(): Promise<void> {
+  await initHook();
+  await handleUserPrompt();
 }

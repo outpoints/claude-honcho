@@ -14,10 +14,32 @@ All notable changes to claude-honcho will be documented in this file.
 
 ### Fixed
 
+- Preserve per-repo workspace/session behavior through upstream’s skill-module refactor. Project-launched MCP servers stay with their repo-local workspace instead of following another window’s last-active directory.
+
 - Skill runners ignored repo-local `.honcho/config.json`. Only the hooks and the MCP server registered the overlay, so `/honcho:status` reported the *global* workspace, peer, and session name while the hooks were reading and writing the repo-local ones — the status was simply wrong in any project with its own config. `/honcho:status` now resolves the same config the hooks do, and names the active repo-local file.
 - `/honcho:import` (backfill) sent every project's transcripts to a single workspace, ignoring the repo-local config of the projects it was importing. A backfill run walks transcripts from every project on the machine, so each transcript's cwd is now resolved against its own nearest `.honcho/config.json`: projects pinned to their own workspace backfill into that workspace, everything else keeps the global one, and `--workspace` still forces one target for the whole run. The import ledger is tracked per workspace, so a failure in one no longer blocks the others from being marked complete.
 - Backfilled session names now match the names live hooks produce. `getSessionName()`'s anchoring rules (`per-repo` git-root resolution, repo-local project-root anchoring, `sessionName` pinning) are extracted into a shared `resolveSessionName()` used by both paths — previously the backfill called the low-level deriver directly, so a `per-repo` project imported from a subdirectory was named after the subdirectory.
 - `/honcho:setup` writes the global config, but said nothing when a repo-local config shadows it in the current directory. It now points at the file that overrides it.
+
+## [0.3.0] - unreleased
+
+### Added
+
+- Every Honcho request carries `X-Honcho-Host` and `X-Honcho-Plugin` headers (via `@honcho-ai/harness-plugin-core`) so server-side telemetry can attribute traffic to the plugin and host harness.
+
+### Changed
+
+- The plugin is distributed as the npm package `@honcho-ai/claude-honcho` and the upstream marketplace installs from it. This fork retains its repository source to preserve per-repo routing. Releases ship a self-contained bundle that runs under Node, so Bun is no longer a prerequisite for using the plugin — it remains the development toolchain.
+
+### Fixed
+
+- Stop hook no longer drops the turn's final reply when it fires before Claude Code has flushed the assistant entry to the transcript. The payload's `last_assistant_message` fills in.
+- Prompts that arrive behind a harness `<system-reminder>` block (the desktop app's worktree notice, background-task status) are no longer treated as harness-injected. The hooks strip the leading reminders, then save the prompt, run recall on it, and use it as the Stop hook's turn boundary.
+
+### Removed
+
+- `install-local.sh` / `install-local.ps1`. Develop against a working tree with `claude --plugin-dir plugins/honcho` instead.
+- Vendored `node_modules` are no longer committed.
 
 ## [0.2.11] - 2026-07-31
 

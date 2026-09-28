@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { captureGitState } from "./git.js";
 import { getInstanceIdForCwd, getClaudeInstanceId } from "./cache.js";
+import { telemetryHeaders } from "@honcho-ai/harness-plugin-core";
 
 function sanitizeForSessionName(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9-_]/g, "-");
@@ -25,11 +26,6 @@ export interface ContextRefreshConfig {
   ttlSeconds?: number;
   /** Skip dialectic chat() calls in user-prompt hook (default: false) */
   skipDialectic?: boolean;
-}
-
-export interface LocalContextConfig {
-  /** Max entries in claude-context.md (default: 50) */
-  maxEntries?: number;
 }
 
 // ============================================
@@ -197,7 +193,8 @@ export interface HostConfig {
   observationMode?: ObservationMode;
   messageUpload?: MessageUploadConfig;
   contextRefresh?: ContextRefreshConfig;
-  localContext?: LocalContextConfig;
+  /** Extra regex patterns redacted from tool summaries (additive to built-in defaults) */
+  redactPatterns?: string[];
   endpoint?: HonchoEndpointConfig;
   /** Composable injection config (session-start + per-turn component menus). */
   injection?: InjectionConfig;
@@ -315,7 +312,8 @@ interface HonchoFileConfig {
   messageUpload?: MessageUploadConfig;
   contextRefresh?: ContextRefreshConfig;
   endpoint?: HonchoEndpointConfig;
-  localContext?: LocalContextConfig;
+  /** Extra regex patterns redacted from tool summaries (additive to built-in defaults) */
+  redactPatterns?: string[];
   enabled?: boolean;
   logging?: boolean;
   sessionStrategy?: SessionStrategy;
@@ -390,8 +388,8 @@ export interface HonchoCLAUDEConfig {
   contextRefresh?: ContextRefreshConfig;
   /** SaaS vs local instance config */
   endpoint?: HonchoEndpointConfig;
-  /** Local claude-context.md settings */
-  localContext?: LocalContextConfig;
+  /** Extra regex patterns redacted from tool summaries (additive to built-in defaults) */
+  redactPatterns?: string[];
   /** Composable injection config (session-start + per-turn component menus) */
   injection?: InjectionConfig;
   /** Register the on-demand `honcho_remember` MCP tool (default: false).
@@ -532,7 +530,7 @@ function resolveConfig(raw: HonchoFileConfig, host: HonchoHost): HonchoCLAUDECon
     messageUpload: hostBlock?.messageUpload ?? raw.messageUpload,
     contextRefresh: hostBlock?.contextRefresh ?? raw.contextRefresh,
     endpoint: hostBlock?.endpoint ?? raw.endpoint,
-    localContext: hostBlock?.localContext ?? raw.localContext,
+    redactPatterns: hostBlock?.redactPatterns ?? raw.redactPatterns,
     injection: hostBlock?.injection ?? raw.injection,
     rememberTool: hostBlock?.rememberTool ?? raw.rememberTool,
     enabled: hostBlock?.enabled ?? raw.enabled,
@@ -736,7 +734,7 @@ const LOCAL_OVERRIDABLE_FIELDS = [
   "apiKey", "peerName", "workspace", "aiPeer",
   "sessionStrategy", "sessionPeerPrefix", "sessionName", "splitSubmodules", "saveMessages",
   "reasoningLevel", "observationMode",
-  "messageUpload", "contextRefresh", "endpoint", "localContext",
+  "messageUpload", "contextRefresh", "endpoint",
   "enabled", "logging",
 ] as const;
 
@@ -870,7 +868,7 @@ export function saveConfig(config: HonchoCLAUDEConfig): void {
   setHostIfExplicit("observationMode", config.observationMode, existing.observationMode);
   setHostIfExplicit("messageUpload", config.messageUpload, existing.messageUpload);
   setHostIfExplicit("contextRefresh", config.contextRefresh, existing.contextRefresh);
-  setHostIfExplicit("localContext", config.localContext, existing.localContext);
+  setHostIfExplicit("redactPatterns", config.redactPatterns, existing.redactPatterns);
   setHostIfExplicit("endpoint", config.endpoint, existing.endpoint);
   setHostIfExplicit("injection", config.injection, existing.injection);
   setHostIfExplicit("rememberTool", config.rememberTool, existing.rememberTool);
@@ -1145,13 +1143,6 @@ export function getContextRefreshConfig(): ContextRefreshConfig {
   };
 }
 
-export function getLocalContextConfig(): LocalContextConfig {
-  const config = loadConfig();
-  return {
-    maxEntries: config?.localContext?.maxEntries ?? 50,
-  };
-}
-
 /**
  * Resolved injection config with every field defaulted. Callers get a fully
  * populated object so they never repeat the fallback literals. Config comes
@@ -1226,6 +1217,7 @@ export interface HonchoClientOptions {
   workspaceId: string;
   timeout?: number;
   maxRetries?: number;
+  defaultHeaders?: Record<string, string>;
 }
 
 /** Get the base URL for Honcho API. Priority: baseUrl > environment > production */
@@ -1245,6 +1237,15 @@ export function getHonchoBaseUrl(config: HonchoCLAUDEConfig): string {
   return getHonchoBaseUrlForEndpoint(config.endpoint);
 }
 
+/** Client identity headers (`X-Honcho-Host`, `X-Honcho-Plugin`) for telemetry attribution. */
+export function getTelemetryHeaders(host: HonchoHost = getDetectedHost()): Record<string, string> {
+  return telemetryHeaders({
+    host: host.replace(/_/g, "-"),
+    plugin: "claude-honcho",
+    pluginVersion: getPluginVersion(),
+  });
+}
+
 export function getHonchoClientOptions(config: HonchoCLAUDEConfig): HonchoClientOptions {
   return {
     apiKey: config.apiKey,
@@ -1252,6 +1253,7 @@ export function getHonchoClientOptions(config: HonchoCLAUDEConfig): HonchoClient
     workspaceId: config.workspace,
     timeout: 120000,
     maxRetries: 1,
+    defaultHeaders: getTelemetryHeaders(),
   };
 }
 

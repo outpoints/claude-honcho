@@ -10,7 +10,7 @@ import { tmpdir } from "os";
 
 const testRoot = mkdtempSync(join(tmpdir(), "claude-honcho-backfill-"));
 const testHome = join(testRoot, "home");
-const backfillModuleUrl = new URL("../src/skills/backfill-runner.js", import.meta.url).href;
+const backfillModuleUrl = new URL("../src/skills/backfill.js", import.meta.url).href;
 
 function writeGlobalConfig(): void {
   const configDir = join(testHome, ".honcho");
