@@ -6,14 +6,18 @@
   },
   "metadata": {
     "description": "Honcho plugins for Claude Code - memory, development tools, and more",
-    "version": "0.2.11"
+    "version": "0.3.0-outpoints.1"
   },
   "plugins": [
     {
       "name": "honcho",
-      "source": "./plugins/honcho",
+      "source": {
+        "source": "github",
+        "repo": "outpoints/claude-honcho",
+        "ref": "release/honcho"
+      },
       "description": "Persistent memory for Claude Code sessions using Honcho",
-      "version": "0.2.11",
+      "version": "0.3.0-outpoints.1",
       "keywords": ["memory", "context", "persistence"],
       "strict": false
     },

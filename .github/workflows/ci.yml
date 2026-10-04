@@ -26,6 +26,9 @@ jobs:
       - name: Type check
         run: bunx tsc --noEmit
 
+      - name: Test
+        run: bun test
+
       - name: Build release stage
         run: bun run scripts/build.ts
 

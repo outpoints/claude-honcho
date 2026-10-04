@@ -16,10 +16,13 @@ import { Honcho } from "@honcho-ai/sdk";
 import {
   loadConfig,
   getHonchoClientOptions,
+  getHonchoBaseUrl,
   getObservationMode,
   resolveSessionName,
   findLocalConfigDir,
   setLocalConfigContext,
+  getLocalConfigDir,
+  setLocalConfigDir,
   getConfigDir,
   setDetectedHost,
   type HonchoCLAUDEConfig,
@@ -30,6 +33,7 @@ import { parseTranscriptForBackfill, findTranscripts, type ParsedMessage } from 
 import * as s from "../styles.js";
 import { join, basename } from "path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { createHash } from "node:crypto";
 
 interface Args {
   days: number;
@@ -53,9 +57,9 @@ function parseArgs(argv: string[]): Args {
 
 const STATE_FILE = join(getConfigDir(), "backfill-state.json");
 
-/** Idempotency ledger: which (workspace, transcript@mtime) pairs already imported. */
+/** Idempotency ledger; v2 keys include the destination and session identity. */
 interface BackfillState {
-  imported: Record<string, number>; // key `${workspace}::${transcriptPath}` -> mtimeMs
+  imported: Record<string, number>;
 }
 
 function loadState(): BackfillState {
@@ -74,7 +78,19 @@ function saveState(state: BackfillState): void {
 interface SessionGroup {
   name: string;
   workspace: string;
-  messages: Array<ParsedMessage & { sourceTranscript: string }>;
+  config: HonchoCLAUDEConfig;
+  ledgerScope: string;
+  acceptsLegacyLedger: boolean;
+  messages: Array<ParsedMessage & { sourceTranscript: string; transcriptPath: string; mtimeMs: number }>;
+}
+
+function digest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+/** Credentials affect client reuse, but rotating a key must not re-import history. */
+function destination(config: HonchoCLAUDEConfig): unknown[] {
+  return [getHonchoBaseUrl(config), config.workspace, config.peerName, config.aiPeer, getObservationMode(config)];
 }
 
 /** Effective config for one transcript's cwd. */
@@ -105,16 +121,21 @@ function makeCwdConfigResolver(globalConfig: HonchoCLAUDEConfig): (cwd: string) 
     const memo = byLocalDir.get(key);
     if (memo) return memo;
 
-    setLocalConfigContext(cwd);
-    const resolved: CwdConfig = { config: loadConfig() ?? globalConfig, localDir };
-    byLocalDir.set(key, resolved);
-    return resolved;
+    const previous = getLocalConfigDir();
+    try {
+      setLocalConfigContext(cwd);
+      const resolved: CwdConfig = { config: loadConfig() ?? globalConfig, localDir };
+      byLocalDir.set(key, resolved);
+      return resolved;
+    } finally {
+      setLocalConfigDir(previous);
+    }
   };
 }
 
 /** Group all messages into Honcho sessions, naming each via the strategy that
  *  applies to that message's cwd and the per-message cwd/branch (+ the transcript
- *  uuid for chat-instance). Sessions carry the workspace they belong to. */
+ *  uuid for chat-instance). Keep the complete destination config through upload. */
 export function groupIntoSessions(
   transcripts: Array<{ path: string; mtimeMs: number }>,
   globalConfig: HonchoCLAUDEConfig,
@@ -124,15 +145,13 @@ export function groupIntoSessions(
   groups: Map<string, SessionGroup>;
   parsed: number;
   empty: number;
-  transcriptWorkspaces: Map<string, Set<string>>;
 } {
   const groups = new Map<string, SessionGroup>();
-  const transcriptWorkspaces = new Map<string, Set<string>>();
   const configFor = makeCwdConfigResolver(globalConfig);
   let parsed = 0;
   let empty = 0;
 
-  for (const { path } of transcripts) {
+  for (const { path, mtimeMs } of transcripts) {
     const { messages, cwd: tCwd, gitBranch: tBranch, sessionId } = parseTranscriptForBackfill(path);
     if (messages.length === 0) {
       empty++;
@@ -144,7 +163,8 @@ export function groupIntoSessions(
       const cwd = msg.cwd || tCwd;
       if (!cwd) continue; // can't name a session without a directory
 
-      const { config, localDir } = configFor(cwd);
+      const { config: resolvedConfig, localDir } = configFor(cwd);
+      const config = workspaceOverride ? { ...resolvedConfig, workspace: workspaceOverride } : resolvedConfig;
       const strategy: SessionStrategy = config.sessionStrategy ?? "per-directory";
       const workspace = workspaceOverride ?? config.workspace;
 
@@ -160,24 +180,26 @@ export function groupIntoSessions(
               localDir,
             });
 
-      // Same session name can exist in two workspaces — key on both.
-      const key = `${workspace}::${name}`;
+      // Identical workspace/session names may belong to different servers or
+      // peers. Never share credentials or observation settings between groups.
+      const target = destination(config);
+      const key = digest([target, name, config.apiKey]);
       let group = groups.get(key);
       if (!group) {
-        group = { name, workspace, messages: [] };
+        group = {
+          name, workspace, config,
+          ledgerScope: `v2:${digest([target, name])}`,
+          // Old imports always used the global endpoint and peers. Only trust
+          // their workspace-only ledger when that routing was actually correct.
+          acceptsLegacyLedger: digest(target) === digest(destination({ ...globalConfig, workspace })),
+          messages: [],
+        };
         groups.set(key, group);
       }
-      group.messages.push({ ...msg, sourceTranscript: source });
-
-      let seen = transcriptWorkspaces.get(path);
-      if (!seen) {
-        seen = new Set<string>();
-        transcriptWorkspaces.set(path, seen);
-      }
-      seen.add(workspace);
+      group.messages.push({ ...msg, sourceTranscript: source, transcriptPath: path, mtimeMs });
     }
   }
-  return { groups, parsed, empty, transcriptWorkspaces };
+  return { groups, parsed, empty };
 }
 
 export async function run(): Promise<void> {
@@ -211,43 +233,29 @@ export async function run(): Promise<void> {
   console.log(`  ${s.label("AI peer")}:     ${config.aiPeer}`);
   console.log("");
 
-  // Discover + filter transcripts.
-  // A transcript's workspace isn't known until its cwd is parsed, so without an
-  // explicit --workspace the ledger is consulted across all workspaces: a
-  // transcript already imported at this mtime is done, wherever it landed.
+  // Resolve destinations before consulting the ledger: one transcript can
+  // span several projects, endpoints, or sessions, each with its own outcome.
   const allTranscripts = findTranscripts(args.days);
   const state = loadState();
-  const importedMtimeByPath = new Map<string, number>();
-  for (const [key, mtimeMs] of Object.entries(state.imported)) {
-    const sep = key.indexOf("::");
-    if (sep === -1) continue;
-    importedMtimeByPath.set(key.slice(sep + 2), mtimeMs);
+  const { groups, parsed, empty } = groupIntoSessions(
+    allTranscripts, config, config.sessions ?? {}, args.workspace
+  );
+  for (const [key, group] of groups) {
+    group.messages = group.messages.filter((m) =>
+      state.imported[`${group.ledgerScope}::${m.transcriptPath}`] !== m.mtimeMs &&
+      !(group.acceptsLegacyLedger && state.imported[`${group.workspace}::${m.transcriptPath}`] === m.mtimeMs)
+    );
+    if (group.messages.length === 0) groups.delete(key);
   }
-  const isImported = (t: { path: string; mtimeMs: number }): boolean =>
-    args.workspace
-      ? state.imported[`${args.workspace}::${t.path}`] === t.mtimeMs
-      : importedMtimeByPath.get(t.path) === t.mtimeMs;
-  const already = allTranscripts.filter(isImported);
-  const todo = allTranscripts.filter((t) => !isImported(t));
 
   console.log(s.section("Scanning transcripts"));
   console.log(s.listItem(`${allTranscripts.length} transcript(s) in window`));
-  if (already.length > 0) {
-    console.log(s.listItem(s.dim(`${already.length} already imported — skipping`)));
-  }
-  if (todo.length === 0) {
+  if (groups.size === 0) {
     console.log("");
     console.log(s.success("Nothing new to import."));
     process.exit(0);
   }
 
-  // Group into sessions
-  const { groups, parsed, empty, transcriptWorkspaces } = groupIntoSessions(
-    todo,
-    config,
-    config.sessions ?? {},
-    args.workspace
-  );
   const totalMessages = [...groups.values()].reduce((n, g) => n + g.messages.length, 0);
 
   console.log(s.listItem(`${parsed} transcript(s) with content${empty ? s.dim(` (${empty} empty, skipped)`) : ""}`));
@@ -270,23 +278,21 @@ export async function run(): Promise<void> {
     process.exit(0);
   }
 
-  // Upload. One client per target workspace — a run can span several when
-  // projects carry their own repo-local config.
+  // Reuse clients only for identical connection settings (including credentials).
   const clients = new Map<string, Honcho>();
-  const clientFor = (workspace: string): Honcho => {
-    let client = clients.get(workspace);
+  const clientFor = (targetConfig: HonchoCLAUDEConfig): Honcho => {
+    const opts = getHonchoClientOptions(targetConfig);
+    const key = digest(opts);
+    let client = clients.get(key);
     if (!client) {
-      const opts = getHonchoClientOptions(config);
-      opts.workspaceId = workspace;
       // Backfilling large histories: give the network more headroom than the hooks.
       opts.timeout = 60_000;
       opts.maxRetries = 3;
       client = new Honcho(opts);
-      clients.set(workspace, client);
+      clients.set(key, client);
     }
     return client;
   };
-  const observationMode = getObservationMode(config);
 
   const workspaceList = [...new Set(sorted.map((g) => g.workspace))];
   if (workspaceList.length === 0) workspaceList.push(defaultWorkspace);
@@ -295,19 +301,18 @@ export async function run(): Promise<void> {
   let uploadedSessions = 0;
   let uploadedMessages = 0;
   const errors: string[] = [];
-  const failedWorkspaces = new Set<string>();
 
   for (const g of sorted) {
-    const honcho = clientFor(g.workspace);
+    const honcho = clientFor(g.config);
     try {
       const [session, userPeer, aiPeer] = await Promise.all([
         honcho.session(g.name),
-        honcho.peer(config.peerName),
-        honcho.peer(config.aiPeer),
+        honcho.peer(g.config.peerName),
+        honcho.peer(g.config.aiPeer),
       ]);
 
       const peers: Parameters<typeof session.addPeers>[0] =
-        observationMode === "directional" ? [userPeer, [aiPeer, { observeOthers: true }]] : [userPeer, aiPeer];
+        getObservationMode(g.config) === "directional" ? [userPeer, [aiPeer, { observeOthers: true }]] : [userPeer, aiPeer];
       await session.addPeers(peers);
 
       const fallbackTs = new Date().toISOString();
@@ -329,29 +334,19 @@ export async function run(): Promise<void> {
       });
 
       await addMessagesBatched(session, messages);
+      for (const m of g.messages) {
+        state.imported[`${g.ledgerScope}::${m.transcriptPath}`] = m.mtimeMs;
+      }
+      saveState(state);
       uploadedSessions++;
       uploadedMessages += g.messages.length;
       console.log(s.listItem(s.success(`${g.name} ${s.dim(`(${g.messages.length} msg)`)}`)));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`${g.name}: ${msg}`);
-      failedWorkspaces.add(g.workspace);
       console.log(s.listItem(s.warn(`${g.name} — ${msg}`)));
     }
   }
-
-  // Mark a transcript imported only for workspaces that took it cleanly; a
-  // workspace with any failure stays unmarked so a re-run retries just that one.
-  for (const t of todo) {
-    // Transcripts that parsed empty produced no group — mark them so they are
-    // not re-scanned every run.
-    const targets = transcriptWorkspaces.get(t.path) ?? new Set([defaultWorkspace]);
-    for (const workspace of targets) {
-      if (failedWorkspaces.has(workspace)) continue;
-      state.imported[`${workspace}::${t.path}`] = t.mtimeMs;
-    }
-  }
-  saveState(state);
 
   console.log("");
   console.log(

@@ -11,8 +11,8 @@ name: Release
 # The npm dist-tag is derived from the version: prerelease versions publish
 # under next, stable versions under latest.
 #
-# Requires the NPM_TOKEN secret: an npm automation token with publish rights
-# on the @honcho-ai scope.
+# Upstream requires NPM_TOKEN with publish rights on @honcho-ai. Forks use
+# the existing release/honcho branch channel without publishing to that scope.
 
 on:
   workflow_dispatch:
@@ -57,6 +57,7 @@ jobs:
         id: version
         env:
           VERSION: ${{ inputs.version }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           # Whole-string match: [[ =~ ]] anchors reject embedded CR/LF, which
           # a line-based grep would let through into GITHUB_OUTPUT.
@@ -72,23 +73,25 @@ jobs:
           # the retry path, and the later publish/release steps skip what
           # already exists. Lookups fail closed: only a confirmed E404 (no
           # package yet) counts as absence.
-          set +e
-          CURRENT_OUT="$(npm view @honcho-ai/claude-honcho dist-tags.latest 2>&1)"
-          CURRENT_STATUS=$?
-          set -e
-          if [ "$CURRENT_STATUS" -eq 0 ]; then
-            CURRENT="$CURRENT_OUT"
-          elif echo "$CURRENT_OUT" | grep -q "E404"; then
-            CURRENT=""
-          else
-            echo "::error::npm lookup for dist-tags.latest failed: $CURRENT_OUT"
-            exit 1
-          fi
-          if [ "$DIST_TAG" = "latest" ] && [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION" ]; then
-            HIGHEST="$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n1)"
-            if [ "$HIGHEST" != "$VERSION" ]; then
-              echo "::error::$VERSION is lower than the published latest ($CURRENT)"
+          if [ "$REPOSITORY" = "plastic-labs/claude-honcho" ]; then
+            set +e
+            CURRENT_OUT="$(npm view @honcho-ai/claude-honcho dist-tags.latest 2>&1)"
+            CURRENT_STATUS=$?
+            set -e
+            if [ "$CURRENT_STATUS" -eq 0 ]; then
+              CURRENT="$CURRENT_OUT"
+            elif echo "$CURRENT_OUT" | grep -q "E404"; then
+              CURRENT=""
+            else
+              echo "::error::npm lookup for dist-tags.latest failed: $CURRENT_OUT"
               exit 1
+            fi
+            if [ "$DIST_TAG" = "latest" ] && [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION" ]; then
+              HIGHEST="$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n1)"
+              if [ "$HIGHEST" != "$VERSION" ]; then
+                echo "::error::$VERSION is lower than the published latest ($CURRENT)"
+                exit 1
+              fi
             fi
           fi
           {
@@ -99,6 +102,11 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Check source
+        run: |
+          bunx tsc --noEmit
+          bun test
 
       - name: Build release stage
         run: bun run scripts/build.ts
@@ -114,6 +122,7 @@ jobs:
         run: bash scripts/smoke.sh .stage
 
       - name: Publish to npm
+        if: github.repository == 'plastic-labs/claude-honcho'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           DIST_TAG: ${{ steps.version.outputs.dist-tag }}
@@ -133,9 +142,8 @@ jobs:
             npm publish .stage --provenance --access public --tag "$DIST_TAG"
           fi
 
-      # Standby distribution channel: the same staged tree on an orphan
-      # branch, so marketplace.json can switch to a github source with a
-      # one-line change if npm distribution ever becomes a problem.
+      # Fork marketplace installs this self-contained tree. Upstream keeps it
+      # as a standby distribution channel alongside npm.
       - name: Push release branch
         env:
           VERSION: ${{ steps.version.outputs.version }}

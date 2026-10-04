@@ -4,6 +4,8 @@ All notable changes to claude-honcho will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0-outpoints.1] - 2026-10-04
+
 ### Added
 
 - `sessionStrategy: "per-repo"` maps every working directory to its nearest Git repository root, so subfolders of a repo share one session while worktrees and nested repos (detected via `.git` directories *or* files) each get their own. Outside Git it falls back to `per-directory`, and a repo-local config bounds discovery to the project tree — giving the `splitSubmodules` split without needing that flag.
@@ -13,6 +15,10 @@ All notable changes to claude-honcho will be documented in this file.
 - The workspace-scoped injected-context cache now covers the assistant-context slot only, matching upstream's injection refactor (v0.2.7+), which no longer caches user context at all.
 
 ### Fixed
+
+- Backfill uploads now retain each repo's endpoint, credentials, peers, and observation mode, including when `--workspace` overrides the workspace name. Identical session/workspace names on different servers or with different peers remain separate.
+- Import completion is recorded per destination, session, and transcript. Retrying a partial failure skips successful destinations; legacy workspace-only records remain valid for imports that used the correct global endpoint and peers. Credentials are never stored in the ledger.
+- The fork marketplace installs the self-contained Node bundle from `release/honcho`. The existing release workflow supports fork publication without access to upstream's npm package, and hook commands support installation paths containing spaces.
 
 - Preserve per-repo workspace/session behavior through upstream’s skill-module refactor. Project-launched MCP servers stay with their repo-local workspace instead of following another window’s last-active directory.
 
@@ -29,7 +35,7 @@ All notable changes to claude-honcho will be documented in this file.
 
 ### Changed
 
-- The plugin is distributed as the npm package `@honcho-ai/claude-honcho` and the upstream marketplace installs from it. This fork retains its repository source to preserve per-repo routing. Releases ship a self-contained bundle that runs under Node, so Bun is no longer a prerequisite for using the plugin — it remains the development toolchain.
+- The plugin is distributed as the npm package `@honcho-ai/claude-honcho` and the upstream marketplace installs from it. This fork distributes its bundle through `release/honcho` to preserve per-repo routing. Releases ship a self-contained bundle that runs under Node, so Bun is no longer a prerequisite for using the plugin — it remains the development toolchain.
 
 ### Fixed
 

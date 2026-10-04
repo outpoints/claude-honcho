@@ -19,6 +19,8 @@ const version =
 
 await rm(STAGE, { recursive: true, force: true });
 await mkdir(join(STAGE, ".claude-plugin"), { recursive: true });
+// The same tree is committed to release/honcho as well as packaged for npm.
+await Bun.write(join(STAGE, ".gitignore"), ".env\n.env.*\nnode_modules/\n");
 
 // A source module must appear once per bundle. Bun duplicates a module that an
 // entry imports directly while a dependency also imports it, which gives the
@@ -115,7 +117,10 @@ function rewriteEntryPoints(text: string): string {
     .replace(/bun run ("?)\$\{CLAUDE_PLUGIN_ROOT\}\/src\/(skills\/[\w-]+)\.ts\1/g, 'node $1${CLAUDE_PLUGIN_ROOT}/dist/$2.js$1');
 }
 
-const hooksJson = rewriteEntryPoints(await Bun.file(join(ROOT, "hooks/hooks.json")).text());
+// Rewrite decoded command strings so quoted paths survive JSON escaping.
+const hooks = await Bun.file(join(ROOT, "hooks/hooks.json")).json();
+const hooksJson = JSON.stringify(hooks, (_key, value) =>
+  typeof value === "string" ? rewriteEntryPoints(value) : value, 2) + "\n";
 assertStagedPaths("hooks/hooks.json", hooksJson);
 await Bun.write(join(STAGE, "hooks/hooks.json"), hooksJson);
 

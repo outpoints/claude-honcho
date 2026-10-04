@@ -19,17 +19,15 @@ A plugin marketplace for Claude Code, powered by [Honcho](https://honcho.dev) fr
 
 ## Installation
 
-**This fork:** its marketplace keeps the repository source so per-repo workspace
-and session routing are retained. Install dependencies with `bun install` in
-`plugins/honcho`, then load that directory with `claude --plugin-dir` (disable any
-other enabled Honcho copy first). For a Node bundle, run `bun run scripts/build.ts`
-in that directory and load `.stage/`. The upstream npm package does not include
-this fork's per-repo additions. The upstream instructions below install upstream.
+**This fork:** install from `outpoints/claude-honcho` to retain per-repo workspace
+and session routing. The marketplace downloads a self-contained Node bundle from
+this repository's `release/honcho` branch; no Bun or dependency install is needed.
+The upstream npm package does not include this fork's per-repo additions.
 
 Add the marketplace to Claude Code:
 
 ```
-/plugin marketplace add plastic-labs/claude-honcho
+/plugin marketplace add outpoints/claude-honcho
 ```
 
 Then install the plugin(s) you want:
@@ -40,6 +38,26 @@ Then install the plugin(s) you want:
 ```
 
 You'll need to restart Claude Code for the plugins to take effect. Follow the instructions below for setting up each plugin.
+
+To update an existing installation from this fork:
+
+```bash
+claude plugin marketplace update honcho
+claude plugin update honcho@honcho
+```
+
+Then restart Claude Code. If the `honcho` marketplace is registered to
+`plastic-labs/claude-honcho`, remove that marketplace and add this fork before
+installing; both marketplaces use the same name.
+
+For development, run `bun install --frozen-lockfile`, `bun test`, and
+`bunx tsc --noEmit` in `plugins/honcho`. Build with `bun run scripts/build.ts`
+and load `.stage/` with `claude --plugin-dir` (disable any other Honcho copy first).
+To publish a tested source commit on `main`, dispatch the **Release** GitHub
+workflow with a new version such as `0.3.0-outpoints.2`. It validates the bundle,
+updates `release/honcho`, and creates a GitHub release. Fork releases do not
+publish to Plastic Labs' npm package. The bundled manifest supplies the installed
+version, so each release must use a new version for Claude Code to refresh its cache.
 
 ---
 
@@ -99,7 +117,7 @@ Then restart your terminal so the new variables take effect.
 ### Step 3: Install the Plugin
 
 ```
-/plugin marketplace add plastic-labs/claude-honcho
+/plugin marketplace add outpoints/claude-honcho
 /plugin install honcho@honcho
 ```
 
