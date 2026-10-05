@@ -4,6 +4,12 @@ All notable changes to claude-honcho will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.3-outpoints.1] - 2026-10-04
+
+### Fixed
+
+- Correct the fork version to reflect its upstream 0.3.3 baseline. The previous `0.3.0-outpoints.1` release already contained upstream 0.3.3 (`fc5cbc4`) and the subsequent main-branch fix (`aab96b9`); this release corrects metadata and documents how to select the version without changing runtime behavior.
+
 ## [0.3.0-outpoints.1] - 2026-10-04
 
 ### Added

@@ -54,10 +54,14 @@ For development, run `bun install --frozen-lockfile`, `bun test`, and
 `bunx tsc --noEmit` in `plugins/honcho`. Build with `bun run scripts/build.ts`
 and load `.stage/` with `claude --plugin-dir` (disable any other Honcho copy first).
 To publish a tested source commit on `main`, dispatch the **Release** GitHub
-workflow with a new version such as `0.3.0-outpoints.2`. It validates the bundle,
+workflow with a new version such as `0.3.3-outpoints.2`. It validates the bundle,
 updates `release/honcho`, and creates a GitHub release. Fork releases do not
 publish to Plastic Labs' npm package. The bundled manifest supplies the installed
 version, so each release must use a new version for Claude Code to refresh its cache.
+Use the latest upstream release included in the fork as the version prefix, after
+verifying its tag is an ancestor of the release commit. Check upstream GitHub
+releases or npm dist-tags: upstream source manifests and unreleased changelog
+headings are development fallbacks and can lag the published version.
 
 ---
 

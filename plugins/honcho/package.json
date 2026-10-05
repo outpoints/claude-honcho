@@ -1,6 +1,6 @@
 {
   "name": "claude-honcho",
-  "version": "0.3.0-outpoints.1",
+  "version": "0.3.3-outpoints.1",
   "description": "Persistent memory for Claude Code sessions using Honcho by Plastic Labs",
   "type": "module",
   "keywords": [
