@@ -46,6 +46,7 @@ coverage/
 # Claude Code project-specific settings (user-specific)
 .claude/
 CLAUDE.md
+AGENTS.md
 
 # Temporary files
 tmp/
