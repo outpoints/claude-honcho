@@ -4,6 +4,12 @@ All notable changes to claude-honcho will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.3-outpoints.2] - 2026-10-10
+
+### Fixed
+
+- Stop hook prints only when the upload fails (upstream #153). Claude Code shows an async hook's `systemMessage` to the model on the next turn, so the per-turn "saved N assistant msg(s)" line cost context to report success. Success now goes only to `~/.honcho/activity.log`. A failed upload prints one warning line with the message count, and the error text stays in the log.
+
 ## [0.3.3-outpoints.1] - 2026-10-04
 
 ### Fixed
