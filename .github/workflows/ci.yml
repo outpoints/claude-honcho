@@ -39,9 +39,12 @@ jobs:
       - name: Build release stage
         run: bun run scripts/build.ts
 
+      # Pinned to the version release.yml validates with. Newer validators
+      # type-check every source and test file without the plugin's tsconfig
+      # (bun-types), which fails the unbundled tree on Node/Bun globals.
       - name: Validate plugins
         run: |
-          npm install -g @anthropic-ai/claude-code
+          npm install -g @anthropic-ai/claude-code@2.1.292
           claude plugin validate .stage --strict
           claude plugin validate . --strict
           claude plugin validate ../honcho-dev --strict
