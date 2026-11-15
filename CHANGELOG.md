@@ -2,6 +2,22 @@
 
 All notable changes to claude-honcho will be documented in this file.
 
+## [0.4.0-outpoints.1] - 2026-11-15
+
+Upstream 0.4.0 (`6947c56`, npm `latest`) with upstream #169 and #170. Upstream's own changes are listed under [Unreleased] below, where upstream keeps them until it adds a 0.4.0 heading. 0.4.0 is a breaking redesign: each chat is its own Honcho session, nothing is injected per prompt, settings live only in `hosts.claude_code`, and `/honcho` opens a pane.
+
+### Changed
+
+- The repo-local `.honcho/config.json` overlay is ported to 0.4.0 (plastic-labs/claude-honcho#44; see its entry under [Unreleased]). Existing repo-local files keep their behavior: `sessionStrategy: "per-repo"` still gives each git repository under the project one shared session, `"per-directory"` one session for the project root, and `sessionName` pins one. A shared session joins only the scopes it is missing, so a new chat never queues a backfill of its history.
+- Repo-local `enabled: false` and `saveMessages: false` still keep a project out of Honcho, live and on import. Upstream 0.4.0 removed both settings; the fork honors them in repo-local files only.
+- Session names are used exactly as written. `sessionPeerPrefix` no longer adds the peer name, so to keep using a session such as `alice-notes`, set `"sessionName": "alice-notes"`.
+- Fork releases must use an `-outpoints.N` version. Upstream's `release-branch.yml` mirrors any stable `honcho-v*` release from npm, so a fork tag naming an upstream version would replace the fork's bundle on `release/honcho`.
+
+### Removed
+
+- `sessionStrategy` and the `sessions` map in `~/.honcho/config.json` no longer name sessions, along with upstream's other global session settings. Set the strategy in a project's `.honcho/config.json` instead.
+- The 0.3.x context-cache scoping, MCP last-active-directory pinning and per-destination import ledger. The mechanisms they patched are gone upstream: there is no context cache, the MCP server reads its launch directory, and an import routes each whole transcript.
+
 ## [Unreleased]
 
 ### Added
@@ -63,6 +79,41 @@ Covers 0.3.0 through 0.3.4.
 
 - `install-local.sh` / `install-local.ps1`. Develop against a working tree with `claude --plugin-dir plugins/honcho` instead.
 - Vendored `node_modules` are no longer committed.
+
+## [0.3.3-outpoints.2] - 2026-10-10
+
+### Fixed
+
+- Stop hook prints only when the upload fails (upstream #153). Claude Code shows an async hook's `systemMessage` to the model on the next turn, so the per-turn "saved N assistant msg(s)" line cost context to report success. Success now goes only to `~/.honcho/activity.log`. A failed upload prints one warning line with the message count, and the error text stays in the log.
+
+## [0.3.3-outpoints.1] - 2026-10-04
+
+### Fixed
+
+- Correct the fork version to reflect its upstream 0.3.3 baseline. The previous `0.3.0-outpoints.1` release already contained upstream 0.3.3 (`fc5cbc4`) and the subsequent main-branch fix (`aab96b9`); this release corrects metadata and documents how to select the version without changing runtime behavior.
+
+## [0.3.0-outpoints.1] - 2026-10-04
+
+### Added
+
+- `sessionStrategy: "per-repo"` maps every working directory to its nearest Git repository root, so subfolders of a repo share one session while worktrees and nested repos (detected via `.git` directories *or* files) each get their own. Outside Git it falls back to `per-directory`, and a repo-local config bounds discovery to the project tree — giving the `splitSubmodules` split without needing that flag.
+
+### Changed
+
+- The workspace-scoped injected-context cache now covers the assistant-context slot only, matching upstream's injection refactor (v0.2.7+), which no longer caches user context at all.
+
+### Fixed
+
+- Backfill uploads now retain each repo's endpoint, credentials, peers, and observation mode, including when `--workspace` overrides the workspace name. Identical session/workspace names on different servers or with different peers remain separate.
+- Import completion is recorded per destination, session, and transcript. Retrying a partial failure skips successful destinations; legacy workspace-only records remain valid for imports that used the correct global endpoint and peers. Credentials are never stored in the ledger.
+- The fork marketplace installs the self-contained Node bundle from `release/honcho`. The existing release workflow supports fork publication without access to upstream's npm package, and hook commands support installation paths containing spaces.
+
+- Preserve per-repo workspace/session behavior through upstream’s skill-module refactor. Project-launched MCP servers stay with their repo-local workspace instead of following another window’s last-active directory.
+
+- Skill runners ignored repo-local `.honcho/config.json`. Only the hooks and the MCP server registered the overlay, so `/honcho:status` reported the *global* workspace, peer, and session name while the hooks were reading and writing the repo-local ones — the status was simply wrong in any project with its own config. `/honcho:status` now resolves the same config the hooks do, and names the active repo-local file.
+- `/honcho:import` (backfill) sent every project's transcripts to a single workspace, ignoring the repo-local config of the projects it was importing. A backfill run walks transcripts from every project on the machine, so each transcript's cwd is now resolved against its own nearest `.honcho/config.json`: projects pinned to their own workspace backfill into that workspace, everything else keeps the global one, and `--workspace` still forces one target for the whole run. The import ledger is tracked per workspace, so a failure in one no longer blocks the others from being marked complete.
+- Backfilled session names now match the names live hooks produce. `getSessionName()`'s anchoring rules (`per-repo` git-root resolution, repo-local project-root anchoring, `sessionName` pinning) are extracted into a shared `resolveSessionName()` used by both paths — previously the backfill called the low-level deriver directly, so a `per-repo` project imported from a subdirectory was named after the subdirectory.
+- `/honcho:setup` writes the global config, but said nothing when a repo-local config shadows it in the current directory. It now points at the file that overrides it.
 
 ## [0.2.11] - 2026-07-31
 
