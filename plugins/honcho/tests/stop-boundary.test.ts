@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { getCurrentTurnAssistantMessages } from "../src/hooks/stop";
+import { attributedReminder, injectedPrompts, userPrompts } from "./harness-fixtures";
 
 function transcript(lines: object[]): string {
   const path = join(mkdtempSync(join(tmpdir(), "stop-test-")), "t.jsonl");
@@ -22,6 +23,26 @@ const msgA = { type: "assistant", timestamp: "t1", message: { content: [{ type: 
 const msgB = { type: "assistant", timestamp: "t2", message: { content: [{ type: "text", text: "narration B" }] } };
 
 describe("getCurrentTurnAssistantMessages segment boundaries", () => {
+  test.each(userPrompts)("typed content starts a new segment: $prompt", ({ prompt: text }) => {
+    const path = transcript([prompt, msgA, { type: "user", message: { content: text } }, msgB]);
+    expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["narration B"]);
+  });
+
+  test.each(injectedPrompts)("harness content alone is not a human turn: %p", (text) => {
+    const path = transcript([{ type: "user", message: { content: text } }, msgA]);
+    expect(getCurrentTurnAssistantMessages(path)).toEqual([]);
+  });
+
+  test("attributed reminder followed by a slash command starts a segment", () => {
+    const path = transcript([prompt, msgA, { type: "user", message: { content: attributedReminder + "/honcho:status" } }, msgB]);
+    expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["narration B"]);
+  });
+
+  test("a subagent report with system provenance is a wakeup boundary", () => {
+    const path = transcript([prompt, msgA, { type: "user", promptSource: "system", message: { content: injectedPrompts[1] } }, msgB]);
+    expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["narration B"]);
+  });
+
   test("first firing collects the whole turn", () => {
     const path = transcript([prompt, msgA]);
     expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["narration A"]);
@@ -52,6 +73,29 @@ describe("getCurrentTurnAssistantMessages segment boundaries", () => {
     const prefixed = { type: "user", message: { content: "<system-reminder>\nYou are operating in a git worktree.\n</system-reminder>\n\ndo the thing" } };
     const path = transcript([prefixed, msgA]);
     expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["narration A"]);
+  });
+
+  test("slash command starts a new segment", () => {
+    const question = { type: "user", message: { content: "Which editor do I prefer?" } };
+    const reply = { type: "assistant", timestamp: "t1", message: { content: [{ type: "text", text: "You prefer Zed." }] } };
+    const command = {
+      type: "user",
+      message: { content: "<command-message>honcho:status</command-message>\n<command-name>/honcho:status</command-name>" },
+    };
+    const skillBody = { type: "user", isMeta: true, message: { content: [{ type: "text", text: "Show current Honcho memory status." }] } };
+    const status = { type: "assistant", timestamp: "t2", message: { content: [{ type: "text", text: "Honcho is connected." }] } };
+    const path = transcript([question, reply, command, skillBody, status]);
+    expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["Honcho is connected."]);
+  });
+
+  test("model-invoked skill (isMeta) does not end the segment", () => {
+    const skill = {
+      type: "user",
+      isMeta: true,
+      message: { content: "<command-message>workflow-authoring</command-message>\n<command-name>workflow-authoring</command-name>" },
+    };
+    const path = transcript([prompt, msgA, toolResult, skill, msgB]);
+    expect(getCurrentTurnAssistantMessages(path).map((b) => b.text)).toEqual(["narration A", "narration B"]);
   });
 
   test("no prompt and no wakeup collects nothing", () => {

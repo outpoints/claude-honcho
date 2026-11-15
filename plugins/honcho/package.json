@@ -1,6 +1,6 @@
 {
   "name": "claude-honcho",
-  "version": "0.3.3-outpoints.2",
+  "version": "0.2.11",
   "description": "Persistent memory for Claude Code sessions using Honcho by Plastic Labs",
   "type": "module",
   "keywords": [
@@ -14,9 +14,13 @@
   ],
   "author": "Plastic Labs",
   "license": "MIT",
+  "scripts": {
+    "test": "bun test",
+    "e2e": "bun e2e/run.ts"
+  },
   "dependencies": {
-    "@honcho-ai/harness-plugin-core": "^0.1.0",
-    "@honcho-ai/sdk": "^2.1.0",
+    "@honcho-ai/harness-plugin-core": "^0.2.0",
+    "@honcho-ai/sdk": "^2.9.0",
     "@modelcontextprotocol/sdk": "^1.26.0"
   },
   "devDependencies": {

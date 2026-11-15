@@ -4,42 +4,44 @@ All notable changes to claude-honcho will be documented in this file.
 
 ## [Unreleased]
 
-## [0.3.3-outpoints.2] - 2026-10-10
-
-### Fixed
-
-- Stop hook prints only when the upload fails (upstream #153). Claude Code shows an async hook's `systemMessage` to the model on the next turn, so the per-turn "saved N assistant msg(s)" line cost context to report success. Success now goes only to `~/.honcho/activity.log`. A failed upload prints one warning line with the message count, and the error text stays in the log.
-
-## [0.3.3-outpoints.1] - 2026-10-04
-
-### Fixed
-
-- Correct the fork version to reflect its upstream 0.3.3 baseline. The previous `0.3.0-outpoints.1` release already contained upstream 0.3.3 (`fc5cbc4`) and the subsequent main-branch fix (`aab96b9`); this release corrects metadata and documents how to select the version without changing runtime behavior.
-
-## [0.3.0-outpoints.1] - 2026-10-04
-
 ### Added
 
-- `sessionStrategy: "per-repo"` maps every working directory to its nearest Git repository root, so subfolders of a repo share one session while worktrees and nested repos (detected via `.git` directories *or* files) each get their own. Outside Git it falls back to `per-directory`, and a repo-local config bounds discovery to the project tree — giving the `splitSubmodules` split without needing that flag.
+- `/honcho setup` signs in to Honcho cloud with your browser, or takes an API key, then asks what Honcho should call you. A browser sign-in refreshes its own token.
+- Each new session joins two Honcho scopes, named after its git repository and the machine's hostname. `chat` takes `scope` to answer only from one scope's sessions, or `workspace: true` to ask across the whole workspace.
 
 ### Changed
 
-- The workspace-scoped injected-context cache now covers the assistant-context slot only, matching upstream's injection refactor (v0.2.7+), which no longer caches user context at all.
+- Config is read and written through `@honcho-ai/harness-plugin-core` 0.2.0 (config schema version 2). The plugin reads only `hosts.claude_code`; top-level `apiKey`, `peerName`, `workspace` and `baseUrl` are no longer read. If your file still has them, the plugin copies them (and old key names like `endpoint`) into `hosts.claude_code` at session start and says so once. It leaves the top level and other plugins' blocks alone. `HONCHO_BASE_URL` replaces `HONCHO_ENDPOINT` (`local` meant `http://localhost:8000`) and `HONCHO_AI_PEER` replaces `HONCHO_CLAUDE_PEER` / `HONCHO_CURSOR_PEER`; as before, the old names still work in a setup configured only through environment variables, with no key or sign-in in the config file. `HONCHO_WORKSPACE` / `HONCHO_AI_PEER` now override the file.
+- Each Claude Code chat is its own Honcho session, named after the Claude Code session id: `/clear` and a new chat start a new one, resume continues it. This replaces per-directory sessions; `sessionStrategy`, `sessionPeerPrefix` and `sessions` are removed.
+- Nothing is injected per prompt. Session start injects the memory directives and your peer card, and Claude recalls the rest by calling `chat`.
+- `/honcho` (Claude Code 2.1.287 or later) replaces the `/honcho:status`, `/honcho:config`, `/honcho:import` and `/honcho:setup` skills and the statusline script, and opens a pane with the session link, dream history and peer card.
+- `search` covers all sessions by default; pass `scope: "session"` for this chat only.
+- `/honcho import` names sessions by Claude Code session id, like the live hooks, and skips chats the plugin already saved as they happened, including the one you run it from.
+- `logging: false` and `HONCHO_LOGGING=false` from earlier versions still turn off the logs in `~/.honcho/`, and the upgrade keeps the setting in your config.
+- `peerName` and the API key from `/honcho setup` are stored in the plugin's own block, `hosts.claude_code`, not at the top of `~/.honcho/config.json`. With no `peerName` of its own, the plugin uses the top-level one, then one another plugin already uses, then your login name, so plugins sharing a workspace stay one peer.
+- The base URL setting is `baseUrl`, the same key every other Honcho plugin reads.
+- Short replies ("ok", "yes", "go ahead") are saved and reasoned over like any other message. They were saved with reasoning turned off.
 
 ### Fixed
 
-- Backfill uploads now retain each repo's endpoint, credentials, peers, and observation mode, including when `--workspace` overrides the workspace name. Identical session/workspace names on different servers or with different peers remain separate.
-- Import completion is recorded per destination, session, and transcript. Retrying a partial failure skips successful destinations; legacy workspace-only records remain valid for imports that used the correct global endpoint and peers. Credentials are never stored in the ledger.
-- The fork marketplace installs the self-contained Node bundle from `release/honcho`. The existing release workflow supports fork publication without access to upstream's npm package, and hook commands support installation paths containing spaces.
+- Subagent hand-backs (`<agent-message …>`) and attribute-bearing `<system-reminder …>` envelopes are no longer saved as user messages or used for recall. Genuine prompts following leading reminders are preserved across live hooks and transcript imports; similar tag names and literal XML remain user content.
 
-- Preserve per-repo workspace/session behavior through upstream’s skill-module refactor. Project-launched MCP servers stay with their repo-local workspace instead of following another window’s last-active directory.
+### Removed
 
-- Skill runners ignored repo-local `.honcho/config.json`. Only the hooks and the MCP server registered the overlay, so `/honcho:status` reported the *global* workspace, peer, and session name while the hooks were reading and writing the repo-local ones — the status was simply wrong in any project with its own config. `/honcho:status` now resolves the same config the hooks do, and names the active repo-local file.
-- `/honcho:import` (backfill) sent every project's transcripts to a single workspace, ignoring the repo-local config of the projects it was importing. A backfill run walks transcripts from every project on the machine, so each transcript's cwd is now resolved against its own nearest `.honcho/config.json`: projects pinned to their own workspace backfill into that workspace, everything else keeps the global one, and `--workspace` still forces one target for the whole run. The import ledger is tracked per workspace, so a failure in one no longer blocks the others from being marked complete.
-- Backfilled session names now match the names live hooks produce. `getSessionName()`'s anchoring rules (`per-repo` git-root resolution, repo-local project-root anchoring, `sessionName` pinning) are extracted into a shared `resolveSessionName()` used by both paths — previously the backfill called the low-level deriver directly, so a `per-repo` project imported from a subdirectory was named after the subdirectory.
-- `/honcho:setup` writes the global config, but said nothing when a repo-local config shadows it in the current directory. It now points at the file that overrides it.
+- Config settings that no longer did anything: `reasoningLevel` (the `chat` tool defaults to `medium`; pass `reasoning_level` per call), `contextRefresh`, `messageUpload` and `statusline`, plus the context cache `contextRefresh` fed.
+- Tool-use capture (`saveToolUse`, the PostToolUse hook and `redactPatterns`) and git-event capture (`saveGitEvents`). The plugin saves your messages and Claude's replies, nothing else.
+- The opt-in `honcho_remember` tool and its `rememberTool` setting. `chat` is the one recall tool; Claude can call it several times in parallel.
+- `globalOverride`. Each plugin now uses the `workspace` in its own block under `hosts`. If your config set `globalOverride: true`, the upgrade copies the top-level `workspace` and `aiPeer` into `hosts.claude_code`, so you stay in the same workspace.
+- `saveMessages`, `enabled`, `HONCHO_SAVE_MESSAGES` and `HONCHO_ENABLED`. Every message is saved; to stop, disable the plugin in Claude Code's `/plugin` menu or uninstall it. The upgrade removes the two settings from `hosts.claude_code`.
+- `observationMode`. Recall, conclusions and the peer card always read your own view (what was `unified`).
+- The `get_briefing`, `get_context` and `get_representation` MCP tools and `/honcho:briefing`. Use `chat`.
+- `injection.sessionStart`. Session start always injects the directives and your peer card.
+- `endpoint.environment`. Set `baseUrl` instead (`http://localhost:8000` for a local Honcho), the same key every other Honcho plugin reads. Session start moves an existing `endpoint` into `baseUrl`.
+- The PreCompact hook. Claude Code writes PreCompact stdout only to its debug log, so the "memory anchor" never reached the model or the compaction summary. SessionStart already re-injects memory after compaction (`source: "compact"`).
 
-## [0.3.0] - unreleased
+## [0.3.4] - 2026-10-21
+
+Covers 0.3.0 through 0.3.4.
 
 ### Added
 
@@ -47,12 +49,14 @@ All notable changes to claude-honcho will be documented in this file.
 
 ### Changed
 
-- The plugin is distributed as the npm package `@honcho-ai/claude-honcho` and the upstream marketplace installs from it. This fork distributes its bundle through `release/honcho` to preserve per-repo routing. Releases ship a self-contained bundle that runs under Node, so Bun is no longer a prerequisite for using the plugin — it remains the development toolchain.
+- The plugin is distributed as the npm package `@honcho-ai/claude-honcho` and the marketplace installs from it. Releases ship a self-contained bundle that runs under Node, so Bun is no longer a prerequisite for using the plugin — it remains the development toolchain.
 
 ### Fixed
 
 - Stop hook no longer drops the turn's final reply when it fires before Claude Code has flushed the assistant entry to the transcript. The payload's `last_assistant_message` fills in.
 - Prompts that arrive behind a harness `<system-reminder>` block (the desktop app's worktree notice, background-task status) are no longer treated as harness-injected. The hooks strip the leading reminders, then save the prompt, run recall on it, and use it as the Stop hook's turn boundary.
+- Messages relayed from another Claude Code session (`<cross-session-message …>` in the user slot) are treated as harness-injected: they are no longer saved as the user's own message or used as a recall query. Before, the deriver turned another agent's text into conclusions about the user. Supersedes #132, which no longer applies after the filters moved to `src/prompt-filters.ts`.
+- `HONCHO_SAVE_MESSAGES=false` now stops message uploads when `~/.honcho/config.json` exists. It was only honored in env-only setups, so installs with a config file kept uploading while `get_config` reported `saveMessages` as shadowed by the env var.
 
 ### Removed
 
@@ -118,19 +122,6 @@ All notable changes to claude-honcho will be documented in this file.
 ### Fixed
 
 - MCP `chat` tool no longer times out on long dialectic queries (~80s at max reasoning). Dialectic calls run on a dedicated no-retry Honcho client under a single 120s deadline covering the whole flow, and the plugin's MCP server config sets a 150s per-tool timeout, so the server's clean timeout error always surfaces before the harness aborts the call.
-
-### Added
-
-- Repo-local config overlay — a `.honcho/config.json` inside a repository overrides the global `~/.honcho/config.json` for that working tree, so you can route a project's memory to a dedicated workspace and keep unrelated observations out of it
-  - Discovered by walking up from the session's working directory (never matches the global `~/.honcho`); honored by all hooks and the MCP server
-  - Overlay semantics: only the fields you set are overridden; `apiKey`, `endpoint`, and other fields inherit from the global config, so secrets need not live in the repo
-  - Read-only to the plugin: the repo file is never written, and a repo-local override can never leak into or modify the global config; `get_config` reports when a repo-local config is active, and while one is active `set_config` won't modify it — it points you to edit the repo file directly
-  - Session anchoring: with a repo-local config, the session name is anchored to the project root (the folder containing `.honcho/`) instead of the current working directory, so subfolders of a project share one session instead of fragmenting; an optional `sessionName` field pins an exact name, and the nearest-ancestor `.honcho/` wins so placement controls granularity
-  - `splitSubmodules` (opt-in): when set in a project's `.honcho`, each nested git repo (submodule) gets its own session named after the submodule while inheriting the parent's workspace — keeping submodule work separate without placing a `.honcho` in each submodule; a submodule with its own `.honcho` still takes precedence
-
-### Fixed
-
-- Injected-context cache is now scoped per workspace. The `context-cache.json` snapshot used to build the at-prompt memory hint was a single global slot, so with multiple Claude Code sessions running concurrently on different workspaces, one session could briefly inject another workspace's context. Each workspace now keeps its own cached snapshot. (Observation routing was always correct; this only affected the read-side hint.)
 
 ## [0.2.5] - 2026-06-02
 

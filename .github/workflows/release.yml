@@ -1,24 +1,26 @@
 name: Release
 
-# Releases the honcho plugin. Source carries no release version: the version
-# is a dispatch input, stamped into the staged plugin.json and package.json
-# at build time, so a release never commits anything to main. The registry
-# and the GitHub Releases page are the record of what is published.
+# Releases this fork's honcho plugin. Source carries no release version: the
+# version is a dispatch input, stamped into the staged plugin.json and
+# package.json at build time.
 #
-# Publish and release creation are idempotent, so re-dispatching the same
-# version completes whatever a failed run left undone.
+# Upstream (plastic-labs) stages releases on npm and mirrors the approved
+# tarball onto release/honcho (release-branch.yml). This fork cannot publish
+# to the @honcho-ai npm scope, and its marketplace installs the bundle from
+# release/honcho directly, so this workflow builds, checks and pushes that
+# branch itself, then creates the GitHub release and its tag on the exact
+# commit it built.
 #
-# The npm dist-tag is derived from the version: prerelease versions publish
-# under next, stable versions under latest.
-#
-# Upstream requires NPM_TOKEN with publish rights on @honcho-ai. Forks use
-# the existing release/honcho branch channel without publishing to that scope.
+# Versions are the latest upstream release the fork includes plus an
+# -outpoints.N suffix (e.g. 0.4.0-outpoints.1). The suffix is required: it
+# keeps fork tags from naming an upstream version, which release-branch.yml
+# would otherwise mirror from npm over this fork's bundle.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (e.g. 0.3.0 or 0.3.0-rc.1)"
+        description: "Version to release (e.g. 0.4.0-outpoints.1)"
         type: string
         required: true
 
@@ -26,79 +28,45 @@ concurrency:
   group: release
   cancel-in-progress: false
 
-permissions:
-  contents: write # release/honcho branch, tag + GitHub Release
-  id-token: write # npm provenance
+permissions: {}
 
 jobs:
   release:
     # Dispatch runs the workflow definition from the selected ref; only the
-    # reviewed copy on main may perform a release.
+    # reviewed copy on main may release.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write # release/honcho branch and GitHub release
     defaults:
       run:
         working-directory: plugins/honcho
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          persist-credentials: false
 
-      # npm's latest tag points at the most recently published version, not
-      # the semver max, so a non-monotonic stable release would repoint
-      # latest backwards. Prereleases are exempt (they publish under next).
+      # No dependency cache: a release must not restore state that another
+      # workflow run could have written.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ^22.22.2
+
       - name: Validate version
         id: version
         env:
           VERSION: ${{ inputs.version }}
-          REPOSITORY: ${{ github.repository }}
         run: |
           # Whole-string match: [[ =~ ]] anchors reject embedded CR/LF, which
           # a line-based grep would let through into GITHUB_OUTPUT.
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::'$VERSION' is not a valid semver version"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-outpoints\.[0-9]+$ ]]; then
+            echo "::error::'$VERSION' is not a fork version like 0.4.0-outpoints.1"
             exit 1
           fi
-          case "$VERSION" in
-            *-*) DIST_TAG=next; PRERELEASE=true ;;
-            *)   DIST_TAG=latest; PRERELEASE=false ;;
-          esac
-          # Equal versions pass through: re-dispatching a published version is
-          # the retry path, and the later publish/release steps skip what
-          # already exists. Lookups fail closed: only a confirmed E404 (no
-          # package yet) counts as absence.
-          if [ "$REPOSITORY" = "plastic-labs/claude-honcho" ]; then
-            set +e
-            CURRENT_OUT="$(npm view @honcho-ai/claude-honcho dist-tags.latest 2>&1)"
-            CURRENT_STATUS=$?
-            set -e
-            if [ "$CURRENT_STATUS" -eq 0 ]; then
-              CURRENT="$CURRENT_OUT"
-            elif echo "$CURRENT_OUT" | grep -q "E404"; then
-              CURRENT=""
-            else
-              echo "::error::npm lookup for dist-tags.latest failed: $CURRENT_OUT"
-              exit 1
-            fi
-            if [ "$DIST_TAG" = "latest" ] && [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION" ]; then
-              HIGHEST="$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n1)"
-              if [ "$HIGHEST" != "$VERSION" ]; then
-                echo "::error::$VERSION is lower than the published latest ($CURRENT)"
-                exit 1
-              fi
-            fi
-          fi
-          {
-            echo "version=$VERSION"
-            echo "dist-tag=$DIST_TAG"
-            echo "prerelease=$PRERELEASE"
-          } >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -106,6 +74,7 @@ jobs:
       - name: Check source
         run: |
           bunx tsc --noEmit
+          bunx tsc --noEmit -p e2e
           bun test
 
       - name: Build release stage
@@ -115,53 +84,34 @@ jobs:
 
       - name: Validate staged plugin
         run: |
-          npm install -g @anthropic-ai/claude-code
+          npm install -g @anthropic-ai/claude-code@2.1.292
           claude plugin validate .stage --strict
 
       - name: Smoke test bundled entry points
         run: bash scripts/smoke.sh .stage
 
-      - name: Publish to npm
-        if: github.repository == 'plastic-labs/claude-honcho'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          DIST_TAG: ${{ steps.version.outputs.dist-tag }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          # Fail closed: publish only on a confirmed E404 for this version.
-          set +e
-          EXISTS_OUT="$(npm view "@honcho-ai/claude-honcho@$VERSION" version 2>&1)"
-          EXISTS_STATUS=$?
-          set -e
-          if [ "$EXISTS_STATUS" -eq 0 ] && [ -n "$EXISTS_OUT" ]; then
-            echo "$VERSION already on npm; skipping publish"
-          elif [ "$EXISTS_STATUS" -ne 0 ] && ! echo "$EXISTS_OUT" | grep -q "E404"; then
-            echo "::error::npm lookup for $VERSION failed: $EXISTS_OUT"
-            exit 1
-          else
-            npm publish .stage --provenance --access public --tag "$DIST_TAG"
-          fi
-
-      # Fork marketplace installs this self-contained tree. Upstream keeps it
-      # as a standby distribution channel alongside npm.
+      # The marketplace installs this self-contained tree.
       - name: Push release branch
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           cd .stage
-          git init -b release/honcho
+          printf '.env\n.env.*\nnode_modules/\n' > .gitignore
+          git init -q -b release/honcho
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "honcho v$VERSION"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" release/honcho
+          git commit -q -m "honcho v$VERSION"
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
+            push -f "https://github.com/$GITHUB_REPOSITORY.git" release/honcho
 
       # gh release create makes the tag server-side at --target, so the tag
-      # always lands on the exact commit that was published.
-      - name: Create GitHub Release
+      # always lands on the exact commit that was built.
+      - name: Create GitHub release
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PRERELEASE: ${{ steps.version.outputs.prerelease }}
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="honcho-v$VERSION"
@@ -169,8 +119,8 @@ jobs:
             echo "$TAG release already exists; skipping"
           else
             gh release create "$TAG" \
-              --target "${{ github.sha }}" \
+              --target "$GITHUB_SHA" \
               --title "honcho v$VERSION" \
               --generate-notes \
-              $([ "$PRERELEASE" = "true" ] && echo --prerelease)
+              --prerelease
           fi

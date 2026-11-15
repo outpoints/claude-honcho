@@ -2,17 +2,10 @@
  * Runner script for the status skill.
  * Minimal: connection, queue, conclusions.
  */
-import { Honcho, type Page, type Conclusion } from "@honcho-ai/sdk";
+import type { Page, Conclusion } from "@honcho-ai/sdk";
 import type { QueueStatus } from "@honcho-ai/sdk";
-import {
-  loadConfig,
-  getHonchoClientOptions,
-  getEndpointInfo,
-  getSessionName,
-  setLocalConfigContext,
-  getLocalConfigPath,
-  hasLocalConfig,
-} from "../config.js";
+import { loadConfig, getEndpointInfo, getSessionName, describeAuth, getAuthNotice } from "../config.js";
+import { createHonchoClient } from "../honcho-client.js";
 import * as s from "../styles.js";
 
 export async function status(): Promise<void> {
@@ -20,23 +13,17 @@ export async function status(): Promise<void> {
   console.log(s.header("honcho status"));
   console.log("");
 
-  // Register the repo-local `.honcho/config.json` overlay for this working tree
-  // before reading config, exactly as the hooks and the MCP server do. Without
-  // it this command reports the *global* workspace/peer/session while the hooks
-  // are writing to the repo-local one — the status is then simply wrong.
-  setLocalConfigContext(process.cwd());
-
   const config = loadConfig();
   if (!config) {
     console.log(s.warn("Not configured"));
-    console.log(s.dim("Set HONCHO_API_KEY environment variable"));
+    console.log(s.dim("Run /honcho setup to sign in, or set the HONCHO_API_KEY environment variable"));
     return;
   }
 
   const endpointInfo = getEndpointInfo(config);
 
   try {
-    const honcho = new Honcho(getHonchoClientOptions(config));
+    const honcho = await createHonchoClient(config);
     const pingStart = Date.now();
 
     const [queueResult, conclusionsResult] = await Promise.allSettled([
@@ -53,11 +40,11 @@ export async function status(): Promise<void> {
 
     console.log(`  ${s.label("Connection")}:  ${s.success("connected")} ${s.dim(`(${latency}ms)`)}`);
     console.log(`  ${s.label("Workspace")}:   ${config.workspace} ${s.dim(`@ ${endpointInfo.url}`)}`);
-    console.log(`  ${s.label("Session")}:     ${getSessionName(process.cwd())}`);
+    console.log(`  ${s.label("Session")}:     ${getSessionName() ?? "unknown"}`);
     console.log(`  ${s.label("Peers")}:       ${config.peerName} / ${config.aiPeer}`);
-    if (hasLocalConfig()) {
-      console.log(`  ${s.label("Config")}:      ${s.dim(`repo-local — ${getLocalConfigPath()}`)}`);
-    }
+    console.log(`  ${s.label("Auth")}:        ${describeAuth(config)}`);
+    const authNotice = getAuthNotice(config);
+    if (authNotice) console.log(`  ${s.warn(authNotice)}`);
 
     // Observation queue — messages being processed into conclusions
     if (queueResult.status === "fulfilled") {
@@ -86,7 +73,7 @@ export async function status(): Promise<void> {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes("401") || message.includes("Unauthorized")) {
-      console.log(`  ${s.label("Connection")}:  ${s.error("auth failed")} ${s.dim("check API key")}`);
+      console.log(`  ${s.label("Connection")}:  ${s.error("auth failed")} ${s.dim(`${describeAuth(config)}; run /honcho setup`)}`);
     } else if (message.includes("ECONNREFUSED") || message.includes("fetch failed")) {
       console.log(`  ${s.label("Connection")}:  ${s.error("unreachable")} ${s.dim(endpointInfo.url)}`);
     } else {
@@ -96,3 +83,4 @@ export async function status(): Promise<void> {
 
   console.log("");
 }
+

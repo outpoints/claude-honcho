@@ -1,10 +1,11 @@
-import { Honcho, Session, Peer } from "@honcho-ai/sdk";
-import { initHook, loadConfig, getSessionForPath, getSessionName, getHonchoClientOptions, isPluginEnabled, isLoggingEnabled, getCachedStdin, readStdinText } from "../config.js";
+import { Session, Peer } from "@honcho-ai/sdk";
+import { initHook, loadConfig, getSessionName, getCachedStdin, readStdinText, isLoggingEnabled } from "../config.js";
+import { createHonchoClient } from "../honcho-client.js";
 import { existsSync, readFileSync } from "fs";
-import { getInstanceIdForCwd, chunkContent, addMessagesBatched } from "../cache.js";
+import { chunkContent, addMessagesBatched } from "../cache.js";
 import { logHook, logApiCall, setLogContext } from "../log.js";
 import { visStopMessage } from "../visual.js";
-import { stripLeadingReminders } from "../prompt-filters.js";
+import { isHarnessInjected, isSlashCommand } from "../prompt-filters.js";
 
 interface HookInput {
   session_id?: string;
@@ -35,18 +36,25 @@ function isWakeupBoundary(entry: TranscriptEntry): boolean {
   return entry.promptSource === "system" || entry.origin?.kind === "task-notification";
 }
 
-/** True for a real user-typed prompt. Excludes tool_results, isMeta entries, and `<...>` command caveats. */
+function userText(entry: TranscriptEntry): string {
+  const mc = entry.message?.content ?? entry.content;
+  if (typeof mc === "string") return mc;
+  if (Array.isArray(mc)) return mc.filter((b) => b.type === "text" && b.text).map((b) => b.text!).join("");
+  return "";
+}
+
+/** Same prompt classifier as the live hooks; literal XML is still user text. */
 function isRealUserPrompt(entry: TranscriptEntry): boolean {
   if (entry.isMeta) return false;
-  const mc = entry.message?.content ?? entry.content;
-  const text =
-    typeof mc === "string"
-      ? mc
-      : Array.isArray(mc)
-        ? mc.filter((b) => b.type === "text" && b.text).map((b) => b.text!).join("")
-        : "";
-  const trimmed = stripLeadingReminders(text).trim();
-  return trimmed.length > 0 && !trimmed.startsWith("<");
+  const text = userText(entry);
+  return !isHarnessInjected(text) && !isSlashCommand(text);
+}
+
+/** Typed slash command or skill invocation. Not prompt text to upload, but it starts
+ *  a turn, so the previous turn's reply must not be collected again. Model-invoked
+ *  skills record the same tags with isMeta set and stay inside the current turn. */
+function isSlashCommandBoundary(entry: TranscriptEntry): boolean {
+  return !entry.isMeta && isSlashCommand(userText(entry));
 }
 
 function assistantText(entry: TranscriptEntry): string {
@@ -61,7 +69,7 @@ function assistantText(entry: TranscriptEntry): string {
 type TurnBlock = { text: string; timestamp?: string };
 
 /** Assistant text blocks of the just-completed segment: everything since the last
- *  real user prompt OR wakeup boundary. Wakeup firings would otherwise re-collect
+ *  real user prompt, slash command, or wakeup boundary. Wakeup firings would otherwise re-collect
  *  the whole accumulated turn, duplicating blocks already uploaded. Stop can fire
  *  before the final assistant entry is flushed, so the payload's copy of it fills in. */
 export function getCurrentTurnAssistantMessages(transcriptPath: string, lastAssistantMessage?: string): TurnBlock[] {
@@ -81,12 +89,15 @@ function readTranscriptTurnBlocks(transcriptPath: string): TurnBlock[] {
     return [];
   }
 
-  // Walk back to the last real user prompt or wakeup — the start of the current segment.
+  // Walk back to the last real user prompt, slash command, or wakeup — the start of the current segment.
   let lastPromptIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const entry: TranscriptEntry = JSON.parse(lines[i]);
-      if ((entry.type || entry.role) === "user" && (isRealUserPrompt(entry) || isWakeupBoundary(entry))) {
+      if (
+        (entry.type || entry.role) === "user" &&
+        (isRealUserPrompt(entry) || isSlashCommandBoundary(entry) || isWakeupBoundary(entry))
+      ) {
         lastPromptIdx = i;
         break;
       }
@@ -117,16 +128,6 @@ export async function handleStop(): Promise<void> {
     process.exit(0);
   }
 
-  // Early exit if plugin is disabled
-  if (!isPluginEnabled()) {
-    process.exit(0);
-  }
-
-  // Skip if message saving is disabled
-  if (config.saveMessages === false) {
-    process.exit(0);
-  }
-
   let hookInput: HookInput = {};
   try {
     const input = getCachedStdin() ?? await readStdinText();
@@ -145,11 +146,13 @@ export async function handleStop(): Promise<void> {
 
   const cwd = hookInput.workspace_roots?.[0] || hookInput.cwd || process.cwd();
   const transcriptPath = hookInput.transcript_path;
-  const instanceId = hookInput.session_id || getInstanceIdForCwd(cwd);
-  const sessionName = getSessionName(cwd, instanceId || undefined);
+  const sessionName = getSessionName(hookInput.session_id);
 
-  // Set log context
-  setLogContext(cwd, sessionName);
+  setLogContext(cwd, sessionName ?? undefined);
+  if (!sessionName) {
+    logHook("stop", "No Claude Code session id; skipping");
+    process.exit(0);
+  }
 
   const turnMessages = getCurrentTurnAssistantMessages(transcriptPath || "", hookInput.last_assistant_message);
 
@@ -161,7 +164,7 @@ export async function handleStop(): Promise<void> {
   logHook("stop", `Capturing ${turnMessages.length} assistant message(s) this turn`);
 
   try {
-    const honcho = new Honcho(getHonchoClientOptions(config));
+    const honcho = await createHonchoClient(config);
 
     // Local peer handle, no get-or-create hop (see postUserMessage in user-prompt.ts).
     const noEnsure = () => Promise.resolve();
@@ -175,9 +178,7 @@ export async function handleStop(): Promise<void> {
         aiPeer.message(chunk, {
           createdAt: block.timestamp || fallbackTs,
           metadata: {
-            instance_id: instanceId || undefined,
             type: i === lastIdx ? "assistant_response" : "assistant_intermediate",
-            session_affinity: sessionName,
           },
         })
       )

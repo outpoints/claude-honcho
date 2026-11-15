@@ -19,8 +19,6 @@ const version =
 
 await rm(STAGE, { recursive: true, force: true });
 await mkdir(join(STAGE, ".claude-plugin"), { recursive: true });
-// The same tree is committed to release/honcho as well as packaged for npm.
-await Bun.write(join(STAGE, ".gitignore"), ".env\n.env.*\nnode_modules/\n");
 
 // A source module must appear once per bundle. Bun duplicates a module that an
 // entry imports directly while a dependency also imports it, which gives the
@@ -62,9 +60,7 @@ if (!result.success) {
 }
 await assertNoDuplicateModules(result.outputs);
 
-// Skill runners: separate build rooted at src/ so entries land in
-// dist/skills/, where setup-runner's ../../scripts hop finds the staged
-// statusline script.
+// Skill runners: separate build rooted at src/ so entries land in dist/skills/.
 const runnerEntries = (await readdir(join(ROOT, "src/skills")))
   .filter((f) => f.endsWith("-runner.ts"))
   .map((f) => join(ROOT, "src/skills", f));
@@ -87,7 +83,6 @@ await assertNoDuplicateModules(runnerResult.outputs);
 // them.
 await mkdir(join(STAGE, "scripts"), { recursive: true });
 await cp(join(ROOT, "scripts/check-version.sh"), join(STAGE, "scripts/check-version.sh"));
-await cp(join(ROOT, "scripts/honcho-statusline.sh"), join(STAGE, "scripts/honcho-statusline.sh"));
 
 // README and LICENSE live at the repo root; npm renders the former as the
 // package page and both are expected in a published tarball.
@@ -111,18 +106,33 @@ function assertStagedPaths(relPath: string, text: string): void {
   }
 }
 
-function rewriteEntryPoints(text: string): string {
-  return text
-    .replace(/bun run ("?)\$\{CLAUDE_PLUGIN_ROOT\}\/(hooks\/[\w-]+|mcp-server)\.ts\1/g, 'node $1${CLAUDE_PLUGIN_ROOT}/dist/$2.js$1')
-    .replace(/bun run ("?)\$\{CLAUDE_PLUGIN_ROOT\}\/src\/(skills\/[\w-]+)\.ts\1/g, 'node $1${CLAUDE_PLUGIN_ROOT}/dist/$2.js$1');
+// Shell commands must quote the plugin root, which can contain spaces. In
+// hooks.json the quote is JSON-escaped (\").
+function assertQuotedRoot(relPath: string, text: string): void {
+  for (const match of text.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}/g)) {
+    if (text[match.index - 1] !== '"') {
+      console.error(`${relPath} uses \${CLAUDE_PLUGIN_ROOT} unquoted at offset ${match.index}`);
+      process.exit(1);
+    }
+  }
 }
 
-// Rewrite decoded command strings so quoted paths survive JSON escaping.
-const hooks = await Bun.file(join(ROOT, "hooks/hooks.json")).json();
-const hooksJson = JSON.stringify(hooks, (_key, value) =>
-  typeof value === "string" ? rewriteEntryPoints(value) : value, 2) + "\n";
+// The opening quote (", \" or none) is captured and repeated after the path.
+function rewriteEntryPoints(text: string): string {
+  return text
+    .replace(/bun run (\\?"|)\$\{CLAUDE_PLUGIN_ROOT\}\/(hooks\/[\w-]+|mcp-server)\.ts\1/g, 'node $1${CLAUDE_PLUGIN_ROOT}/dist/$2.js$1')
+    .replace(/bun run (\\?"|)\$\{CLAUDE_PLUGIN_ROOT\}\/src\/(skills\/[\w-]+)\.ts\1/g, 'node $1${CLAUDE_PLUGIN_ROOT}/dist/$2.js$1');
+}
+
+const hooksJson = rewriteEntryPoints(await Bun.file(join(ROOT, "hooks/hooks.json")).text());
 assertStagedPaths("hooks/hooks.json", hooksJson);
+assertQuotedRoot("hooks/hooks.json", hooksJson);
 await Bun.write(join(STAGE, "hooks/hooks.json"), hooksJson);
+
+// The mod's hooks module ships as source; Claude Code compiles it itself.
+for (const mod of (JSON.parse(hooksJson).modules ?? []) as string[]) {
+  await cp(join(ROOT, "hooks", mod), join(STAGE, "hooks", mod));
+}
 
 const mcpServers = await Bun.file(join(ROOT, "mcp-servers.json")).json();
 for (const server of Object.values(mcpServers) as Array<{ command: string; args: string[] }>) {
@@ -172,6 +182,7 @@ for (const skill of await readdir(join(STAGE, "skills"))) {
   if (!existsSync(skillMd)) continue;
   const text = rewriteEntryPoints(await Bun.file(skillMd).text());
   assertStagedPaths(`skills/${skill}/SKILL.md`, text);
+  assertQuotedRoot(`skills/${skill}/SKILL.md`, text);
   await Bun.write(skillMd, text);
 }
 

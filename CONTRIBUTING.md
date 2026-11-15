@@ -15,6 +15,7 @@ claude-honcho/
 │   │   ├── skills/         # Plugin skills
 │   │   ├── scripts/        # build.ts, smoke.sh, and shell helpers
 │   │   ├── tests/
+│   │   ├── e2e/            # harness e2e against the Honcho sandbox
 │   │   ├── mcp-server.ts   # MCP server entry point
 │   │   └── mcp-servers.json
 │   └── honcho-dev/         # SDK skills plugin (no compiled code)
@@ -77,20 +78,25 @@ bunx tsc --noEmit             # type check
 bun test                      # unit tests
 bun run scripts/build.ts      # bundle into .stage/
 bash scripts/smoke.sh .stage  # every bundled entry point must run under node
+bunx tsc --noEmit -p e2e      # type check the e2e driver
+bun run e2e                   # Claude Code + this plugin against the Honcho sandbox
 ```
 
 The smoke test runs the staged tree from a temporary directory with no
 `node_modules` on the resolution path, which is what catches an unbundled
 dependency or a leftover `.ts` reference.
 
+`bun run e2e` needs Docker, `uv` and the `claude` CLI, but no credentials: the model
+is a local mock by default. See [`plugins/honcho/e2e/README.md`](plugins/honcho/e2e/README.md).
+
 ## Working on the `honcho` Plugin
 
 ### Key Files
 
-- `src/hooks/` -- hook implementations (session-start, session-end, user-prompt, pre-compact, post-tool-use, pre-tool, stop, save-user-message)
+- `src/hooks/` -- hook implementations (session-start, session-end, user-prompt, pre-tool-honcho, stop, save-user-message)
 - `src/mcp/server.ts` -- MCP server for memory tools
 - `src/config.ts` -- configuration management
-- `src/cache.ts` -- local caching layer
+- `src/cache.ts` -- first-prompt counter and message chunking/batching
 - `hooks/` -- thin entry-point wrappers that import from `src/`, plus `hooks.json`
 - `skills/` -- markdown skill definitions; the ones with runners call into `src/skills/`
 
@@ -125,8 +131,36 @@ To contribute new skills, create a directory under `plugins/honcho-dev/skills/` 
 3. Update `CHANGELOG.md` if your change is user-facing
 4. Open a pull request with a clear description of what and why
 
-Releases are cut by maintainers via the `Release` workflow, which takes the
-version as a dispatch input. Nothing in the repo needs a version bump in your PR.
+Nothing in the repo needs a version bump in your PR.
+
+## Releases
+
+Maintainers cut releases from the `Release` workflow, which takes the version
+as a dispatch input:
+
+```bash
+gh workflow run release.yml -f version=0.4.0
+```
+
+The workflow builds and validates the staged plugin, stamps the version into
+it, and stages it on npm as `@honcho-ai/claude-honcho` through trusted
+publishing. No npm token is stored anywhere. A staged version is not
+installable until a maintainer approves it with 2FA:
+
+1. Wait for npm's malware scan to finish, then approve the staged version in
+   the package's Staged Packages tab on npmjs.com, or run `npm stage list`
+   and `npm stage approve <id>`.
+2. Publish the draft GitHub Release `honcho-v0.4.0` that the workflow
+   created. This creates the tag on the commit that was staged, and the
+   `Release branch` workflow then mirrors the approved npm tarball onto the
+   `release/honcho` branch. Prereleases and versions lower than the branch's
+   current one are not mirrored.
+
+If the stage is rejected, delete the draft release. Prerelease versions
+(`0.4.0-rc.1`) stage under the `next` dist-tag. Re-dispatching a version that
+is already on npm only fills in a missing draft release. If the draft was
+published before the npm approval, re-run the `Release branch` workflow once
+the version is live.
 
 ## Questions?
 
